@@ -16,391 +16,57 @@ Setup:
 4. Press the link button on your Hue bridge when prompted during first run
 """
 
-from mcp.server.fastmcp import FastMCP, Context
-from qhue import Bridge, QhueException, create_new_username
+# ============================================================================
+# IMPORTS
+# ============================================================================
+
+# Standard library
 import json
-import os
 import logging
-import requests
-from typing import Dict, List, Optional, Tuple
-from contextlib import asynccontextmanager
-from collections.abc import AsyncIterator
-from dataclasses import dataclass
 
-# --- Configuration ---
-# You can customize these values or load from a config file
+# Third-party
+from mcp.server.fastmcp import FastMCP, Context
+from qhue import create_new_username
+from typing import Dict, List
 
-# Bridge IP - can be set to None for auto-discovery
-BRIDGE_IP = "192.168.1.10"  # Your bridge IP (set to None for auto-discovery)
-
-# Path to store bridge connection info
-CONFIG_DIR = os.path.expanduser("~/.hue-mcp")
-CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
-
-# Configure logging
-logging.basicConfig(level=logging.INFO,
-                   format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-logger = logging.getLogger("hue-mcp")
-
-# --- Constants ---
-
-# Default values for operations
-DEFAULT_TRANSITION_TIME = 4  # Transition time in deciseconds (0.4 seconds)
-FUZZY_MATCH_THRESHOLD = 3    # Maximum Levenshtein distance for fuzzy name matching
-
-# Valid room classes for Philips Hue
-VALID_ROOM_CLASSES = (
-    "Living room", "Kitchen", "Dining", "Bedroom", "Kids bedroom", "Bathroom",
-    "Nursery", "Recreation", "Office", "Gym", "Hallway", "Toilet", "Front door",
-    "Garage", "Terrace", "Garden", "Driveway", "Carport", "Home", "Downstairs",
-    "Upstairs", "Top floor", "Attic", "Guest room", "Staircase", "Lounge",
-    "Man cave", "Computer", "Studio", "Music", "TV", "Reading", "Closet",
-    "Storage", "Laundry room", "Balcony", "Porch", "Barbecue", "Pool", "Other"
+# Local modules
+from constants import DEFAULT_TRANSITION_TIME, VALID_ROOM_CLASSES
+from models import HueContext
+from bridge import hue_lifespan
+from utils import (
+    get_bridge_ctx,
+    rgb_to_xy,
+    COLOR_PRESETS,
+    validate_light_id,
+    validate_group_id,
+    validate_light_id_with_suggestions,
+    validate_group_id_with_suggestions,
+    find_similar_names,
+    find_light_by_name_fuzzy,
+    find_group_by_name_fuzzy,
+    format_light_info,
 )
 
-# --- Helper Functions ---
+# ============================================================================
+# LOGGING CONFIGURATION
+# ============================================================================
 
-def discover_bridge() -> Optional[str]:
-    """
-    Attempt to discover Hue bridge on the local network.
-    Returns the bridge IP address or None if not found.
-    """
-    try:
-        logger.info("Attempting bridge discovery via Hue discovery API...")
-        response = requests.get("https://discovery.meethue.com/", timeout=5)
-        if response.status_code == 200:
-            bridges = response.json()
-            if bridges and len(bridges) > 0:
-                bridge_ip = bridges[0].get('internalipaddress')
-                logger.info(f"Discovered bridge at {bridge_ip}")
-                return bridge_ip
-    except Exception as e:
-        logger.warning(f"Bridge discovery failed: {e}")
-    return None
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger("hue-mcp")
 
-# --- Server Context Setup ---
+# ============================================================================
+# MCP SERVER INITIALIZATION
+# ============================================================================
 
-@dataclass
-class HueContext:
-    """Context object holding the Hue bridge connection."""
-    bridge: Bridge
-    light_info: Dict  # Cache of light information
-
-@asynccontextmanager
-async def hue_lifespan(server: FastMCP) -> AsyncIterator[HueContext]:
-    """
-    Manage connection to Hue Bridge.
-
-    This function handles:
-    1. Discovery or connection to the bridge
-    2. Storing/loading connection info
-    3. Building a cache of light information
-    """
-    # Ensure config directory exists
-    os.makedirs(CONFIG_DIR, exist_ok=True)
-
-    # Load saved config if it exists
-    bridge_ip = BRIDGE_IP
-    bridge_username = None
-
-    if os.path.exists(CONFIG_FILE):
-        try:
-            with open(CONFIG_FILE, 'r') as f:
-                config = json.load(f)
-                bridge_ip = config.get('bridge_ip', bridge_ip)
-                bridge_username = config.get('username')
-                logger.info(f"Loaded configuration from {CONFIG_FILE}")
-        except Exception as e:
-            logger.error(f"Error loading config: {e}")
-
-    # Initialize Bridge
-    try:
-        # If no IP specified, attempt discovery
-        if not bridge_ip:
-            logger.info("No bridge IP specified, attempting discovery...")
-            bridge_ip = discover_bridge()
-            if not bridge_ip:
-                raise Exception("Bridge discovery failed. Please set BRIDGE_IP manually.")
-            logger.info(f"Discovered bridge at {bridge_ip}")
-        else:
-            logger.info(f"Using bridge at {bridge_ip}")
-
-        # If no username, need to create one (requires link button press)
-        if not bridge_username:
-            logger.error("No username found in config!")
-            logger.error("=" * 60)
-            logger.error("SETUP REQUIRED:")
-            logger.error("1. Run: python test_connection.py")
-            logger.error("2. Press the link button on your Hue bridge when prompted")
-            logger.error("3. This will create ~/.hue-mcp/config.json")
-            logger.error("4. Then retry running the MCP server")
-            logger.error("=" * 60)
-            raise Exception(
-                "Bridge not configured. Please run 'python test_connection.py' first "
-                "and press the link button on your Hue bridge to authenticate."
-            )
-
-        # Create bridge connection
-        logger.info(f"Connecting to bridge at {bridge_ip}")
-        bridge = Bridge(bridge_ip, bridge_username)
-
-        # Test the connection by fetching lights
-        try:
-            light_info = bridge.lights()
-            logger.info(f"Successfully connected! Found {len(light_info)} lights")
-        except QhueException as e:
-            logger.error(f"Failed to connect to bridge: {e}")
-            raise
-
-        # Save the configuration
-        with open(CONFIG_FILE, 'w') as f:
-            json.dump({
-                'bridge_ip': bridge_ip,
-                'username': bridge_username
-            }, f)
-            logger.info(f"Saved configuration to {CONFIG_FILE}")
-
-        # Initialize and yield the context
-        yield HueContext(bridge=bridge, light_info=light_info)
-
-    except Exception as e:
-        logger.error(f"Error connecting to Hue bridge: {e}")
-        # Re-raise to inform the server of the failure
-        raise
-    finally:
-        # No explicit cleanup needed for bridge
-        pass
-
-# Create MCP server
+# Create MCP server with lifespan management
 mcp = FastMCP(
     "Philips Hue Controller",
     lifespan=hue_lifespan,
     dependencies=["qhue"]
 )
-
-# --- Utility Functions ---
-
-def get_bridge_ctx(ctx: Context) -> Tuple[Bridge, Dict]:
-    """Get the Hue bridge and light info from context."""
-    hue_ctx = ctx.request_context.lifespan_context
-    return hue_ctx.bridge, hue_ctx.light_info
-
-def rgb_to_xy(r: int, g: int, b: int) -> List[float]:
-    """
-    Convert RGB values to XY color space used by Hue.
-    
-    Args:
-        r: Red value (0-255)
-        g: Green value (0-255)
-        b: Blue value (0-255)
-        
-    Returns:
-        List containing [x, y] coordinates in the CIE color space
-    """
-    # Normalize RGB values
-    r, g, b = r/255.0, g/255.0, b/255.0
-    
-    # Apply gamma correction
-    r = pow(r, 2.2) if r > 0.04045 else r/12.92
-    g = pow(g, 2.2) if g > 0.04045 else g/12.92
-    b = pow(b, 2.2) if b > 0.04045 else b/12.92
-    
-    # Convert to XYZ using the Wide RGB D65 conversion matrix
-    X = r * 0.649926 + g * 0.103455 + b * 0.197109
-    Y = r * 0.234327 + g * 0.743075 + b * 0.022598
-    Z = r * 0.000000 + g * 0.053077 + b * 1.035763
-    
-    # Calculate xy values from XYZ
-    sum_XYZ = X + Y + Z
-    if sum_XYZ == 0:
-        return [0, 0]
-    
-    x = X / sum_XYZ
-    y = Y / sum_XYZ
-    
-    return [x, y]
-
-# Color presets for lights (defined after rgb_to_xy is available)
-COLOR_PRESETS = {
-    # White temperature presets
-    "warm": {"ct": 2500},  # Warm white (2500K)
-    "cool": {"ct": 4500},  # Cool white (4500K)
-    "daylight": {"ct": 6500},  # Daylight (6500K)
-
-    # Activity presets (Philips recommended settings)
-    "concentration": {"ct": 4600, "bri": 254},  # Bright cool light
-    "relax": {"ct": 2700, "bri": 144},  # Warm dimmed light
-    "reading": {"ct": 3200, "bri": 219},  # Moderate neutral light
-    "energize": {"ct": 6000, "bri": 254},  # Bright blue light
-
-    # Color presets
-    "red": {"xy": rgb_to_xy(255, 0, 0)},
-    "green": {"xy": rgb_to_xy(0, 255, 0)},
-    "blue": {"xy": rgb_to_xy(0, 0, 255)},
-    "purple": {"xy": rgb_to_xy(128, 0, 128)},
-    "orange": {"xy": rgb_to_xy(255, 165, 0)},
-}
-
-def validate_light_id(light_id: int, light_info: Dict) -> bool:
-    """Validate that a light ID exists."""
-    return str(light_id) in light_info
-
-def validate_group_id(group_id: int, bridge: Bridge) -> bool:
-    """Validate that a group ID exists."""
-    groups = bridge.groups()
-    return str(group_id) in groups
-
-def find_similar_names(search_name: str, items: Dict, threshold: int = FUZZY_MATCH_THRESHOLD) -> List[tuple]:
-    """
-    Find items with names similar to the search term using Levenshtein distance.
-
-    Args:
-        search_name: The name to search for
-        items: Dictionary of items with 'name' field
-        threshold: Maximum edit distance to consider a match
-
-    Returns:
-        List of (id, name, distance) tuples sorted by distance
-    """
-    def levenshtein_distance(s1: str, s2: str) -> int:
-        """Calculate the Levenshtein distance between two strings."""
-        if len(s1) < len(s2):
-            return levenshtein_distance(s2, s1)
-        if len(s2) == 0:
-            return len(s1)
-
-        previous_row = range(len(s2) + 1)
-        for i, c1 in enumerate(s1):
-            current_row = [i + 1]
-            for j, c2 in enumerate(s2):
-                insertions = previous_row[j + 1] + 1
-                deletions = current_row[j] + 1
-                substitutions = previous_row[j] + (c1 != c2)
-                current_row.append(min(insertions, deletions, substitutions))
-            previous_row = current_row
-
-        return previous_row[-1]
-
-    search_lower = search_name.lower()
-    matches = []
-
-    for item_id, item in items.items():
-        item_name = item.get('name', '')
-        item_name_lower = item_name.lower()
-
-        # Exact match
-        if search_lower == item_name_lower:
-            matches.append((item_id, item_name, 0))
-        # Substring match
-        elif search_lower in item_name_lower:
-            matches.append((item_id, item_name, 1))
-        else:
-            # Calculate edit distance
-            distance = levenshtein_distance(search_lower, item_name_lower)
-            if distance <= threshold:
-                matches.append((item_id, item_name, distance))
-
-    # Sort by distance, then by name
-    matches.sort(key=lambda x: (x[2], x[1]))
-    return matches
-
-def validate_light_id_with_suggestions(light_id: int, light_info: Dict) -> str:
-    """
-    Validate light ID and provide helpful error message with suggestions.
-
-    Args:
-        light_id: The light ID to validate
-
-    Returns:
-        Empty string if valid, error message with suggestions if invalid
-    """
-    if validate_light_id(light_id, light_info):
-        return ""
-
-    # Provide helpful suggestions
-    available_lights = [f"{lid} ({light['name']})" for lid, light in light_info.items()]
-    error_msg = f"Error: Light with ID {light_id} not found.\n"
-    error_msg += f"Available light IDs: {', '.join(available_lights[:5])}"
-    if len(available_lights) > 5:
-        error_msg += f"... and {len(available_lights) - 5} more"
-
-    return error_msg
-
-def validate_group_id_with_suggestions(group_id: int, bridge: Bridge) -> str:
-    """
-    Validate group ID and provide helpful error message with suggestions.
-
-    Args:
-        group_id: The group ID to validate
-
-    Returns:
-        Empty string if valid, error message with suggestions if invalid
-    """
-    groups = bridge.groups()
-    if validate_group_id(group_id, bridge):
-        return ""
-
-    # Provide helpful suggestions
-    available_groups = [f"{gid} ({group['name']})" for gid, group in groups.items()]
-    error_msg = f"Error: Group with ID {group_id} not found.\n"
-    error_msg += f"Available group IDs: {', '.join(available_groups[:5])}"
-    if len(available_groups) > 5:
-        error_msg += f"... and {len(available_groups) - 5} more"
-
-    return error_msg
-
-def find_light_by_name_fuzzy(name: str, light_info: Dict) -> Optional[tuple]:
-    """
-    Find a light by name using fuzzy matching.
-
-    Args:
-        name: Partial or misspelled light name
-
-    Returns:
-        Tuple of (light_id, light_name) if found, None otherwise
-    """
-    matches = find_similar_names(name, light_info, threshold=FUZZY_MATCH_THRESHOLD)
-    return (matches[0][0], matches[0][1]) if matches else None
-
-def find_group_by_name_fuzzy(name: str, bridge: Bridge) -> Optional[tuple]:
-    """
-    Find a group by name using fuzzy matching.
-
-    Args:
-        name: Partial or misspelled group name
-
-    Returns:
-        Tuple of (group_id, group_name) if found, None otherwise
-    """
-    groups = bridge.groups()
-    matches = find_similar_names(name, groups, threshold=FUZZY_MATCH_THRESHOLD)
-    return (matches[0][0], matches[0][1]) if matches else None
-
-# qhue API notes:
-# - bridge.lights() - get all lights
-# - bridge.lights[id]() - get specific light
-# - bridge.lights[id](on=True, bri=254) - set light state
-# - bridge.groups() - get all groups
-# - bridge.groups[id]() - get specific group
-# - bridge.groups[id].action(on=True) - set group action
-# - bridge.scenes() - get all scenes
-
-def format_light_info(light_info: Dict) -> Dict:
-    """Format light information for display."""
-    result = {}
-    for light_id, light in light_info.items():
-        # Extract the most useful information
-        result[light_id] = {
-            "name": light["name"],
-            "on": light["state"]["on"],
-            "reachable": light["state"].get("reachable", True),
-            "brightness": light["state"].get("bri"),
-            "color_mode": light["state"].get("colormode"),
-            "type": light["type"],
-            "model": light.get("modelid"),
-            "manufacturer": light.get("manufacturername"),
-        }
-    return result
 
 # --- Convert Resources to Tools ---
 
