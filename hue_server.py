@@ -531,7 +531,11 @@ def get_all_scenes(ctx: Context) -> str:
         logger.error(f"Error getting scenes: {e}")
         return f"Error: {str(e)}"
 
-# --- Tools ---
+# ============================================================================
+# TOOLS - Light and Group Control
+# ============================================================================
+
+# --- Individual Light Control ---
 
 @mcp.tool()
 def turn_on_light(light_id: int, ctx: Context) -> str:
@@ -741,6 +745,8 @@ def set_color_rgb(light_id: int, red: int, green: int, blue: int, ctx: Context, 
         logger.error(f"Error setting RGB color for light {light_id}: {e}")
         return f"Error: {str(e)}"
 
+# --- Group Control ---
+
 @mcp.tool()
 def turn_on_group(group_id: int, ctx: Context) -> str:
     """
@@ -919,7 +925,9 @@ def set_scene(group_id: int, scene_id: str, ctx: Context) -> str:
         logger.error(f"Error applying scene {scene_id} to group {group_id}: {e}")
         return f"Error: {str(e)}"
 
-# --- Helper Tools ---
+# ============================================================================
+# UTILITY TOOLS - Search, Presets, and Management
+# ============================================================================
 
 @mcp.tool()
 def find_light_by_name(name: str, ctx: Context) -> str:
@@ -1260,7 +1268,9 @@ def set_light_effect(light_id: int, effect: str, ctx: Context) -> str:
         logger.error(f"Error setting effect {effect} on light {light_id}: {e}")
         return f"Error: {str(e)}"
 
-# --- Capability Discovery Tools ---
+# ============================================================================
+# CAPABILITY DISCOVERY - Inspect Light Features
+# ============================================================================
 
 @mcp.tool()
 def get_light_capabilities(light_id: int, ctx: Context) -> str:
@@ -1396,7 +1406,9 @@ def get_all_capabilities(ctx: Context) -> str:
         logger.error(f"Error getting all capabilities: {e}")
         return f"Error: {str(e)}"
 
-# --- Setup and Diagnostics Tools ---
+# ============================================================================
+# SETUP AND DIAGNOSTICS - Connection and Health Tools
+# ============================================================================
 
 @mcp.tool()
 def test_connection(ctx: Context) -> str:
@@ -1608,7 +1620,9 @@ def get_connection_diagnostics(ctx: Context) -> str:
 
     return json.dumps(diagnostics, indent=2)
 
-# --- Room Management Tools ---
+# ============================================================================
+# ROOM MANAGEMENT - Room Discovery, Control, and CRUD Operations
+# ============================================================================
 
 @mcp.tool()
 def get_all_rooms(ctx: Context) -> str:
