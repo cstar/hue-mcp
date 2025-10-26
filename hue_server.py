@@ -2011,6 +2011,343 @@ def set_room_preset(room_name: str, preset: str, ctx: Context) -> str:
         logger.error(f"Error setting room preset '{room_name}': {e}")
         return f"Error: {str(e)}"
 
+@mcp.tool()
+def create_room(
+    name: str,
+    light_ids: List[int],
+    room_class: str = "Other",
+    ctx: Context = None
+) -> str:
+    """
+    Create a new room with specified lights.
+
+    Args:
+        name: Name for the new room
+        light_ids: List of light IDs to include in the room
+        room_class: Room type - Options: 'Living room', 'Kitchen', 'Dining', 'Bedroom',
+                    'Kids bedroom', 'Bathroom', 'Nursery', 'Recreation', 'Office',
+                    'Gym', 'Hallway', 'Toilet', 'Front door', 'Garage', 'Terrace',
+                    'Garden', 'Driveway', 'Carport', 'Home', 'Downstairs', 'Upstairs',
+                    'Top floor', 'Attic', 'Guest room', 'Staircase', 'Lounge', 'Man cave',
+                    'Computer', 'Studio', 'Music', 'TV', 'Reading', 'Closet',
+                    'Storage', 'Laundry room', 'Balcony', 'Porch', 'Barbecue', 'Pool', 'Other'
+
+    Returns:
+        Confirmation message with room ID
+    """
+    bridge, light_info = get_bridge_ctx(ctx)
+
+    try:
+        # Validate all light IDs
+        invalid_lights = [lid for lid in light_ids if not validate_light_id(lid, light_info)]
+        if invalid_lights:
+            return f"Error: Invalid light IDs: {invalid_lights}"
+
+        if not light_ids:
+            return "Error: Room must contain at least one light."
+
+        # Convert light IDs to strings
+        light_id_strings = [str(lid) for lid in light_ids]
+
+        # Create the room using direct API call
+        import requests
+        result = requests.post(
+            f"http://{bridge.ip}/api/{bridge.username}/groups",
+            json={
+                "name": name,
+                "lights": light_id_strings,
+                "type": "Room",
+                "class": room_class
+            }
+        )
+        result_data = result.json()
+
+        # Extract the room ID from the result
+        if result_data and isinstance(result_data, list) and len(result_data) > 0:
+            if 'success' in result_data[0]:
+                success_dict = result_data[0]['success']
+                if 'id' in success_dict:
+                    room_id = success_dict['id'].split('/')[-1]
+                    light_names = [light_info[str(lid)]['name'] for lid in light_ids]
+                    return f"Room '{name}' (class: {room_class}) created with ID {room_id}.\nContains {len(light_ids)} lights: {', '.join(light_names)}"
+
+        return f"Error creating room: {result_data}"
+
+    except Exception as e:
+        logger.error(f"Error creating room '{name}': {e}")
+        return f"Error: {str(e)}"
+
+@mcp.tool()
+def add_lights_to_room(room_identifier: str, light_ids: List[int], ctx: Context) -> str:
+    """
+    Add lights to an existing room.
+
+    Args:
+        room_identifier: Room ID or name (fuzzy matching supported)
+        light_ids: List of light IDs to add to the room
+
+    Returns:
+        Confirmation message
+    """
+    bridge, light_info = get_bridge_ctx(ctx)
+
+    try:
+        # Validate light IDs
+        invalid_lights = [lid for lid in light_ids if not validate_light_id(lid, light_info)]
+        if invalid_lights:
+            return f"Error: Invalid light IDs: {invalid_lights}"
+
+        groups = bridge.groups()
+        rooms = {gid: g for gid, g in groups.items() if g.get('type') == 'Room'}
+
+        # Find the room
+        room_id = None
+        room_name = None
+
+        # Try as ID first
+        if room_identifier in rooms:
+            room_id = room_identifier
+            room_name = rooms[room_id]['name']
+        else:
+            # Try name matching
+            matches = find_similar_names(room_identifier, rooms, threshold=3)
+            if not matches:
+                return f"Error: No room found matching '{room_identifier}'."
+            if len(matches) > 1 and matches[0][2] != 0:
+                suggestions = [f"'{m[1]}' (ID: {m[0]})" for m in matches[:3]]
+                return f"Multiple rooms match. Did you mean: {', '.join(suggestions)}?"
+            room_id, room_name, _ = matches[0]
+
+        # Get current lights in room
+        current_lights = set(rooms[room_id]['lights'])
+
+        # Add new lights
+        new_lights = current_lights.union(str(lid) for lid in light_ids)
+
+        # Update room
+        import requests
+        result = requests.put(
+            f"http://{bridge.ip}/api/{bridge.username}/groups/{room_id}",
+            json={"lights": list(new_lights)}
+        )
+        result_data = result.json()
+
+        if result_data and isinstance(result_data, list) and 'success' in result_data[0]:
+            added_names = [light_info[str(lid)]['name'] for lid in light_ids]
+            return f"Added {len(light_ids)} lights to room '{room_name}': {', '.join(added_names)}"
+
+        return f"Error updating room: {result_data}"
+
+    except Exception as e:
+        logger.error(f"Error adding lights to room '{room_identifier}': {e}")
+        return f"Error: {str(e)}"
+
+@mcp.tool()
+def remove_lights_from_room(room_identifier: str, light_ids: List[int], ctx: Context) -> str:
+    """
+    Remove lights from an existing room.
+
+    Args:
+        room_identifier: Room ID or name (fuzzy matching supported)
+        light_ids: List of light IDs to remove from the room
+
+    Returns:
+        Confirmation message
+    """
+    bridge, light_info = get_bridge_ctx(ctx)
+
+    try:
+        groups = bridge.groups()
+        rooms = {gid: g for gid, g in groups.items() if g.get('type') == 'Room'}
+
+        # Find the room
+        room_id = None
+        room_name = None
+
+        if room_identifier in rooms:
+            room_id = room_identifier
+            room_name = rooms[room_id]['name']
+        else:
+            matches = find_similar_names(room_identifier, rooms, threshold=3)
+            if not matches:
+                return f"Error: No room found matching '{room_identifier}'."
+            if len(matches) > 1 and matches[0][2] != 0:
+                suggestions = [f"'{m[1]}' (ID: {m[0]})" for m in matches[:3]]
+                return f"Multiple rooms match. Did you mean: {', '.join(suggestions)}?"
+            room_id, room_name, _ = matches[0]
+
+        # Get current lights
+        current_lights = set(rooms[room_id]['lights'])
+
+        # Remove specified lights
+        lights_to_remove = set(str(lid) for lid in light_ids)
+        new_lights = current_lights - lights_to_remove
+
+        if len(new_lights) == 0:
+            return f"Error: Cannot remove all lights from room. Room must contain at least one light. Consider deleting the room instead."
+
+        # Update room
+        import requests
+        result = requests.put(
+            f"http://{bridge.ip}/api/{bridge.username}/groups/{room_id}",
+            json={"lights": list(new_lights)}
+        )
+        result_data = result.json()
+
+        if result_data and isinstance(result_data, list) and 'success' in result_data[0]:
+            removed_names = [light_info[str(lid)]['name'] for lid in light_ids if str(lid) in lights_to_remove]
+            return f"Removed {len(removed_names)} lights from room '{room_name}': {', '.join(removed_names)}"
+
+        return f"Error updating room: {result_data}"
+
+    except Exception as e:
+        logger.error(f"Error removing lights from room '{room_identifier}': {e}")
+        return f"Error: {str(e)}"
+
+@mcp.tool()
+def delete_room(room_identifier: str, ctx: Context) -> str:
+    """
+    Delete a room.
+
+    Args:
+        room_identifier: Room ID or name (fuzzy matching supported)
+
+    Returns:
+        Confirmation message
+    """
+    bridge, _ = get_bridge_ctx(ctx)
+
+    try:
+        groups = bridge.groups()
+        rooms = {gid: g for gid, g in groups.items() if g.get('type') == 'Room'}
+
+        # Find the room
+        room_id = None
+        room_name = None
+
+        if room_identifier in rooms:
+            room_id = room_identifier
+            room_name = rooms[room_id]['name']
+        else:
+            matches = find_similar_names(room_identifier, rooms, threshold=3)
+            if not matches:
+                return f"Error: No room found matching '{room_identifier}'."
+            if len(matches) > 1 and matches[0][2] != 0:
+                suggestions = [f"'{m[1]}' (ID: {m[0]})" for m in matches[:3]]
+                return f"Multiple rooms match. Did you mean: {', '.join(suggestions)}?"
+            room_id, room_name, _ = matches[0]
+
+        # Delete the room
+        import requests
+        result = requests.delete(
+            f"http://{bridge.ip}/api/{bridge.username}/groups/{room_id}"
+        )
+        result_data = result.json()
+
+        if result_data and isinstance(result_data, list) and 'success' in result_data[0]:
+            return f"Room '{room_name}' (ID: {room_id}) deleted successfully. Note: The lights remain available and can be added to other rooms."
+
+        return f"Error deleting room: {result_data}"
+
+    except Exception as e:
+        logger.error(f"Error deleting room '{room_identifier}': {e}")
+        return f"Error: {str(e)}"
+
+@mcp.tool()
+def create_zone(name: str, light_ids: List[int], ctx: Context, zone_class: str = "Other") -> str:
+    """
+    Create a new zone (multi-room grouping) with specified lights.
+
+    Args:
+        name: Name for the new zone
+        light_ids: List of light IDs to include in the zone
+        zone_class: Zone class (similar to room_class options)
+
+    Returns:
+        Confirmation message with zone ID
+    """
+    bridge, light_info = get_bridge_ctx(ctx)
+
+    try:
+        # Validate all light IDs
+        invalid_lights = [lid for lid in light_ids if not validate_light_id(lid, light_info)]
+        if invalid_lights:
+            return f"Error: Invalid light IDs: {invalid_lights}"
+
+        if not light_ids:
+            return "Error: Zone must contain at least one light."
+
+        # Convert light IDs to strings
+        light_id_strings = [str(lid) for lid in light_ids]
+
+        # Create the zone
+        import requests
+        result = requests.post(
+            f"http://{bridge.ip}/api/{bridge.username}/groups",
+            json={
+                "name": name,
+                "lights": light_id_strings,
+                "type": "Zone",
+                "class": zone_class
+            }
+        )
+        result_data = result.json()
+
+        if result_data and isinstance(result_data, list) and len(result_data) > 0:
+            if 'success' in result_data[0]:
+                success_dict = result_data[0]['success']
+                if 'id' in success_dict:
+                    zone_id = success_dict['id'].split('/')[-1]
+                    light_names = [light_info[str(lid)]['name'] for lid in light_ids]
+                    return f"Zone '{name}' created with ID {zone_id}.\nContains {len(light_ids)} lights: {', '.join(light_names)}"
+
+        return f"Error creating zone: {result_data}"
+
+    except Exception as e:
+        logger.error(f"Error creating zone '{name}': {e}")
+        return f"Error: {str(e)}"
+
+@mcp.tool()
+def control_zone(zone_name: str, on: bool, ctx: Context) -> str:
+    """
+    Turn a zone on or off by name using fuzzy matching.
+
+    Args:
+        zone_name: Full or partial zone name (fuzzy matching supported)
+        on: True to turn on, False to turn off
+
+    Returns:
+        Confirmation message or suggestions
+    """
+    bridge, _ = get_bridge_ctx(ctx)
+
+    try:
+        groups = bridge.groups()
+        zones = {gid: g for gid, g in groups.items() if g.get('type') == 'Zone'}
+
+        if not zones:
+            return "No zones found. Zones can be created using create_zone()."
+
+        # Find matching zones
+        matches = find_similar_names(zone_name, zones, threshold=3)
+
+        if not matches:
+            return f"Error: No zone found matching '{zone_name}'.\nUse get_all_zones() to see available zones."
+
+        if len(matches) == 1 or matches[0][2] == 0:
+            zone_id, zone_name_matched, distance = matches[0]
+            bridge.groups[str(zone_id)].action(on=on)
+            action = "on" if on else "off"
+            return f"Zone '{zone_name_matched}' (ID: {zone_id}) turned {action}."
+
+        # Multiple matches
+        suggestions = [f"'{m[1]}' (ID: {m[0]})" for m in matches[:3]]
+        return f"Multiple zones match '{zone_name}'. Did you mean: {', '.join(suggestions)}?"
+
+    except Exception as e:
+        logger.error(f"Error controlling zone '{zone_name}': {e}")
+        return f"Error: {str(e)}"
+
 # --- Prompts ---
 
 @mcp.prompt()
