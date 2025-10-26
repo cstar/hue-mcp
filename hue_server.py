@@ -1399,6 +1399,218 @@ def get_all_capabilities(ctx: Context) -> str:
         logger.error(f"Error getting all capabilities: {e}")
         return f"Error: {str(e)}"
 
+# --- Setup and Diagnostics Tools ---
+
+@mcp.tool()
+def test_connection(ctx: Context) -> str:
+    """
+    Test the connection to the Hue bridge and verify authentication.
+
+    Returns:
+        Detailed connection status and any issues found
+    """
+    bridge, light_info = get_bridge_ctx(ctx)
+
+    try:
+        # Test basic connectivity
+        config = bridge.config()
+
+        # Test light access
+        lights_count = len(light_info)
+
+        # Test groups access
+        groups = bridge.groups()
+        groups_count = len(groups)
+
+        # Test scenes access
+        scenes = bridge.scenes()
+        scenes_count = len(scenes)
+
+        status = {
+            "connection": "✓ Connected successfully",
+            "authentication": "✓ Authenticated",
+            "bridge_id": config.get('bridgeid', 'Unknown'),
+            "api_version": config.get('apiversion', 'Unknown'),
+            "software_version": config.get('swversion', 'Unknown'),
+            "resources": {
+                "lights": f"✓ {lights_count} lights accessible",
+                "groups": f"✓ {groups_count} groups accessible",
+                "scenes": f"✓ {scenes_count} scenes accessible"
+            },
+            "network": {
+                "ip_address": config.get('ipaddress', 'Unknown'),
+                "mac_address": config.get('mac', 'Unknown'),
+                "netmask": config.get('netmask', 'Unknown'),
+                "gateway": config.get('gateway', 'Unknown')
+            }
+        }
+
+        return json.dumps(status, indent=2)
+
+    except Exception as e:
+        logger.error(f"Connection test failed: {e}")
+        error_info = {
+            "connection": "✗ Connection failed",
+            "error": str(e),
+            "troubleshooting": [
+                "1. Verify bridge IP address is correct",
+                "2. Ensure bridge is powered on and connected to network",
+                "3. Check if you need to re-authenticate (press link button)",
+                "4. Verify network connectivity between server and bridge"
+            ]
+        }
+        return json.dumps(error_info, indent=2)
+
+@mcp.tool()
+def get_bridge_info(ctx: Context) -> str:
+    """
+    Get detailed information about the Hue bridge.
+
+    Returns:
+        JSON string with comprehensive bridge information
+    """
+    bridge, _ = get_bridge_ctx(ctx)
+
+    try:
+        config = bridge.config()
+
+        bridge_info = {
+            "identity": {
+                "name": config.get('name', 'Unknown'),
+                "bridge_id": config.get('bridgeid', 'Unknown'),
+                "model_id": config.get('modelid', 'Unknown'),
+                "manufacturer": "Signify (Philips Hue)"
+            },
+            "software": {
+                "api_version": config.get('apiversion', 'Unknown'),
+                "software_version": config.get('swversion', 'Unknown'),
+                "software_update_available": config.get('swupdate', {}).get('updatestate', 0) == 2
+            },
+            "network": {
+                "ip_address": config.get('ipaddress', 'Unknown'),
+                "mac_address": config.get('mac', 'Unknown'),
+                "netmask": config.get('netmask', 'Unknown'),
+                "gateway": config.get('gateway', 'Unknown'),
+                "dhcp": config.get('dhcp', False)
+            },
+            "features": {
+                "portal_services": config.get('portalservices', False),
+                "link_button": config.get('linkbutton', False),
+                "touchlink": config.get('touchlink', False)
+            },
+            "timezone": config.get('timezone', 'Unknown'),
+            "local_time": config.get('localtime', 'Unknown'),
+            "utc_time": config.get('UTC', 'Unknown')
+        }
+
+        return json.dumps(bridge_info, indent=2)
+
+    except Exception as e:
+        logger.error(f"Error getting bridge info: {e}")
+        return f"Error: {str(e)}"
+
+@mcp.tool()
+def get_connection_diagnostics(ctx: Context) -> str:
+    """
+    Run comprehensive diagnostics on the bridge connection.
+
+    Returns:
+        Detailed diagnostic report with recommendations
+    """
+    bridge, light_info = get_bridge_ctx(ctx)
+
+    diagnostics = {
+        "timestamp": json.dumps(bridge.config().get('UTC', 'Unknown')),
+        "tests": []
+    }
+
+    # Test 1: Bridge connectivity
+    try:
+        config = bridge.config()
+        diagnostics["tests"].append({
+            "test": "Bridge Connectivity",
+            "status": "✓ PASS",
+            "details": f"Connected to bridge {config.get('name', 'Unknown')}"
+        })
+    except Exception as e:
+        diagnostics["tests"].append({
+            "test": "Bridge Connectivity",
+            "status": "✗ FAIL",
+            "details": str(e)
+        })
+        return json.dumps(diagnostics, indent=2)
+
+    # Test 2: Authentication
+    try:
+        lights = bridge.lights()
+        diagnostics["tests"].append({
+            "test": "Authentication",
+            "status": "✓ PASS",
+            "details": "Successfully authenticated with bridge"
+        })
+    except Exception as e:
+        diagnostics["tests"].append({
+            "test": "Authentication",
+            "status": "✗ FAIL",
+            "details": "Authentication failed - may need to re-authenticate"
+        })
+
+    # Test 3: Light reachability
+    unreachable = [f"{lid} ({light['name']})" for lid, light in light_info.items()
+                   if not light['state'].get('reachable', True)]
+
+    if unreachable:
+        diagnostics["tests"].append({
+            "test": "Light Reachability",
+            "status": "⚠ WARNING",
+            "details": f"{len(unreachable)} lights unreachable: {', '.join(unreachable[:3])}"
+        })
+    else:
+        diagnostics["tests"].append({
+            "test": "Light Reachability",
+            "status": "✓ PASS",
+            "details": f"All {len(light_info)} lights are reachable"
+        })
+
+    # Test 4: API version compatibility
+    api_version = config.get('apiversion', '0.0.0')
+    major_version = int(api_version.split('.')[0]) if api_version else 0
+
+    if major_version >= 1:
+        diagnostics["tests"].append({
+            "test": "API Version",
+            "status": "✓ PASS",
+            "details": f"API version {api_version} is compatible"
+        })
+    else:
+        diagnostics["tests"].append({
+            "test": "API Version",
+            "status": "⚠ WARNING",
+            "details": f"API version {api_version} may have limited features"
+        })
+
+    # Summary and recommendations
+    failed = sum(1 for t in diagnostics["tests"] if "✗" in t["status"])
+    warnings = sum(1 for t in diagnostics["tests"] if "⚠" in t["status"])
+
+    if failed == 0 and warnings == 0:
+        diagnostics["summary"] = "All tests passed. System is functioning optimally."
+    elif failed > 0:
+        diagnostics["summary"] = f"{failed} test(s) failed. Immediate attention required."
+        diagnostics["recommendations"] = [
+            "Check bridge power and network connectivity",
+            "Verify authentication credentials",
+            "Consider re-running setup with test_connection()"
+        ]
+    else:
+        diagnostics["summary"] = f"{warnings} warning(s) detected. System functional but may need attention."
+        diagnostics["recommendations"] = [
+            "Check unreachable lights - they may be powered off or out of range",
+            "Consider updating bridge firmware if available"
+        ]
+
+    return json.dumps(diagnostics, indent=2)
+
 # --- Prompts ---
 
 @mcp.prompt()
