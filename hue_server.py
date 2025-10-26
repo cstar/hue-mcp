@@ -30,7 +30,7 @@ from qhue import create_new_username
 from typing import Dict, List, Optional
 
 # Local modules
-from constants import DEFAULT_TRANSITION_TIME, VALID_ROOM_CLASSES
+from constants import DEFAULT_TRANSITION_TIME, VALID_ROOM_CLASSES, SCENE_TEMPLATES
 from models import HueContext
 from bridge import hue_lifespan
 from utils import (
@@ -2007,6 +2007,383 @@ def control_zone(zone_name: str, on: bool, ctx: Context) -> str:
 
     except Exception as e:
         logger.error(f"Error controlling zone '{zone_name}': {e}")
+        return f"Error: {str(e)}"
+
+# ============================================================================
+# SCENE MANAGEMENT - Advanced Scene Control and Templates
+# ============================================================================
+
+@mcp.tool()
+def get_scene(scene_identifier: str, ctx: Context) -> str:
+    """
+    Get detailed information about a specific scene by ID or name.
+
+    Supports fuzzy matching for scene names (e.g., "movie" matches "Movie Time").
+
+    Args:
+        scene_identifier: Scene ID or partial/full scene name
+
+    Returns:
+        JSON string with scene details or error message
+    """
+    bridge, _ = get_bridge_ctx(ctx)
+
+    try:
+        scenes = bridge.scenes()
+
+        # Try direct ID lookup first
+        if scene_identifier in scenes:
+            scene = scenes[scene_identifier]
+            result = {
+                "id": scene_identifier,
+                "name": scene.get("name", "Unknown"),
+                "type": scene.get("type", "Unknown"),
+                "group": scene.get("group"),
+                "lights": scene.get("lights", []),
+                "owner": scene.get("owner"),
+                "recycle": scene.get("recycle", False),
+                "locked": scene.get("locked", False),
+                "last_updated": scene.get("lastupdated")
+            }
+            return json.dumps(result, indent=2)
+
+        # Try fuzzy name matching
+        matches = find_similar_names(scene_identifier, scenes)
+
+        if not matches:
+            return f"Error: No scene found matching '{scene_identifier}'.\nUse get_all_scenes() to see available scenes."
+
+        if len(matches) == 1 or matches[0][2] == 0:
+            # Single match or exact match
+            scene_id, scene_name, distance = matches[0]
+            scene = scenes[scene_id]
+            result = {
+                "id": scene_id,
+                "name": scene_name,
+                "type": scene.get("type", "Unknown"),
+                "group": scene.get("group"),
+                "lights": scene.get("lights", []),
+                "owner": scene.get("owner"),
+                "recycle": scene.get("recycle", False),
+                "locked": scene.get("locked", False),
+                "last_updated": scene.get("lastupdated")
+            }
+            return json.dumps(result, indent=2)
+
+        # Multiple matches - provide suggestions
+        suggestions = [f"'{m[1]}' (ID: {m[0]})" for m in matches[:5]]
+        return f"Multiple scenes match '{scene_identifier}'. Did you mean:\n" + "\n".join(suggestions)
+
+    except Exception as e:
+        logger.error(f"Error getting scene '{scene_identifier}': {e}")
+        return f"Error: {str(e)}"
+
+@mcp.tool()
+def create_scene_from_current(
+    name: str,
+    room_or_group_id: int,
+    ctx: Context,
+    recycle: bool = True
+) -> str:
+    """
+    Create a new scene from the current state of lights in a room/group.
+
+    Captures the current brightness, color, and on/off state of all lights
+    in the specified room or group.
+
+    Args:
+        name: Name for the new scene
+        room_or_group_id: Room or group ID to capture lights from
+        recycle: If True, scene can be auto-deleted to free space (default: True)
+
+    Returns:
+        Confirmation message with scene ID
+    """
+    bridge, light_info = get_bridge_ctx(ctx)
+
+    try:
+        # Validate group/room ID
+        if not validate_group_id(room_or_group_id, bridge):
+            return f"Error: Group/Room with ID {room_or_group_id} not found."
+
+        # Get group info
+        group_info = bridge.groups[str(room_or_group_id)]()
+        group_name = group_info.get('name', f"Group {room_or_group_id}")
+        lights_in_group = group_info.get('lights', [])
+
+        if not lights_in_group:
+            return f"Error: Group '{group_name}' has no lights."
+
+        # Capture current state of each light
+        light_states = {}
+        for light_id in lights_in_group:
+            if light_id in light_info:
+                state = light_info[light_id]['state']
+                light_states[light_id] = {
+                    "on": state.get("on", False),
+                    "bri": state.get("bri"),
+                    "xy": state.get("xy"),
+                    "ct": state.get("ct"),
+                }
+                # Remove None values
+                light_states[light_id] = {k: v for k, v in light_states[light_id].items() if v is not None}
+
+        # Create the scene via API
+        import requests
+        result = requests.post(
+            f"http://{bridge.ip}/api/{bridge.username}/scenes",
+            json={
+                "name": name,
+                "lights": lights_in_group,
+                "recycle": recycle,
+                "type": "GroupScene",
+                "group": str(room_or_group_id),
+                "lightstates": light_states
+            }
+        )
+
+        response = result.json()
+        if result.status_code == 200 and response and len(response) > 0:
+            scene_id = response[0].get('success', {}).get('id')
+            return f"Scene '{name}' created successfully with ID: {scene_id}\nCaptured {len(light_states)} lights from '{group_name}'."
+        else:
+            error_msg = response[0].get('error', {}).get('description', 'Unknown error')
+            return f"Error creating scene: {error_msg}"
+
+    except Exception as e:
+        logger.error(f"Error creating scene from current state: {e}")
+        return f"Error: {str(e)}"
+
+@mcp.tool()
+def delete_scene(scene_identifier: str, ctx: Context) -> str:
+    """
+    Delete a scene by ID or name.
+
+    Supports fuzzy matching for scene names.
+
+    Args:
+        scene_identifier: Scene ID or partial/full scene name
+
+    Returns:
+        Confirmation message
+    """
+    bridge, _ = get_bridge_ctx(ctx)
+
+    try:
+        scenes = bridge.scenes()
+        scene_id = None
+        scene_name = None
+
+        # Try direct ID lookup first
+        if scene_identifier in scenes:
+            scene_id = scene_identifier
+            scene_name = scenes[scene_identifier].get('name', 'Unknown')
+        else:
+            # Try fuzzy name matching
+            matches = find_similar_names(scene_identifier, scenes)
+
+            if not matches:
+                return f"Error: No scene found matching '{scene_identifier}'.\nUse get_all_scenes() to see available scenes."
+
+            if len(matches) > 1 and matches[0][2] != 0:
+                # Multiple non-exact matches
+                suggestions = [f"'{m[1]}' (ID: {m[0]})" for m in matches[:5]]
+                return f"Multiple scenes match '{scene_identifier}'. Please be more specific:\n" + "\n".join(suggestions)
+
+            scene_id, scene_name, _ = matches[0]
+
+        # Delete the scene
+        import requests
+        result = requests.delete(
+            f"http://{bridge.ip}/api/{bridge.username}/scenes/{scene_id}"
+        )
+
+        response = result.json()
+        if result.status_code == 200 and response and len(response) > 0:
+            if 'success' in response[0]:
+                return f"Scene '{scene_name}' (ID: {scene_id}) deleted successfully."
+
+        error_msg = response[0].get('error', {}).get('description', 'Unknown error')
+        return f"Error deleting scene: {error_msg}"
+
+    except Exception as e:
+        logger.error(f"Error deleting scene '{scene_identifier}': {e}")
+        return f"Error: {str(e)}"
+
+@mcp.tool()
+def apply_scene_by_name(scene_name: str, room_name: str, ctx: Context) -> str:
+    """
+    Apply a scene to a room using fuzzy name matching for both.
+
+    Makes it easy to recall scenes naturally, e.g.:
+    - "Apply movie to living room"
+    - "Set bedroom to relax"
+
+    Args:
+        scene_name: Scene name (fuzzy matching supported)
+        room_name: Room name (fuzzy matching supported)
+
+    Returns:
+        Confirmation message
+    """
+    bridge, _ = get_bridge_ctx(ctx)
+
+    try:
+        # Find the scene
+        scenes = bridge.scenes()
+        scene_matches = find_similar_names(scene_name, scenes)
+
+        if not scene_matches:
+            return f"Error: No scene found matching '{scene_name}'.\nUse get_all_scenes() to see available scenes."
+
+        if len(scene_matches) > 1 and scene_matches[0][2] != 0:
+            suggestions = [f"'{m[1]}'" for m in scene_matches[:3]]
+            return f"Multiple scenes match '{scene_name}'. Did you mean: {', '.join(suggestions)}?"
+
+        scene_id, scene_name_matched, _ = scene_matches[0]
+
+        # Find the room
+        groups = bridge.groups()
+        rooms = {gid: g for gid, g in groups.items() if g.get('type') == 'Room'}
+
+        if not rooms:
+            return "No rooms found. Rooms can be created in the Hue app or using create_room()."
+
+        room_matches = find_similar_names(room_name, rooms)
+
+        if not room_matches:
+            return f"Error: No room found matching '{room_name}'.\nUse get_all_rooms() to see available rooms."
+
+        if len(room_matches) > 1 and room_matches[0][2] != 0:
+            suggestions = [f"'{m[1]}'" for m in room_matches[:3]]
+            return f"Multiple rooms match '{room_name}'. Did you mean: {', '.join(suggestions)}?"
+
+        room_id, room_name_matched, _ = room_matches[0]
+
+        # Apply the scene
+        bridge.groups[str(room_id)].action(scene=scene_id)
+        room_class = rooms[room_id].get('class', 'Room')
+
+        return f"Scene '{scene_name_matched}' applied to {room_class} '{room_name_matched}'."
+
+    except Exception as e:
+        logger.error(f"Error applying scene '{scene_name}' to room '{room_name}': {e}")
+        return f"Error: {str(e)}"
+
+@mcp.tool()
+def list_scene_templates(ctx: Context = None) -> str:
+    """
+    List all available scene templates.
+
+    Templates are pre-defined scene configurations for common scenarios
+    like Movie Time, Dinner, Party, etc.
+
+    Returns:
+        JSON string with template names and descriptions
+    """
+    templates_info = {}
+    for template_name, template_data in SCENE_TEMPLATES.items():
+        templates_info[template_name] = {
+            "description": template_data["description"],
+            "brightness_percent": round((template_data["lights_state"].get("bri", 254) / 254) * 100),
+            "has_color": "xy" in template_data["lights_state"],
+            "has_temperature": "ct" in template_data["lights_state"]
+        }
+
+    return json.dumps(templates_info, indent=2)
+
+@mcp.tool()
+def create_scene_from_template(
+    template_name: str,
+    scene_name: str,
+    room_or_group_id: int,
+    ctx: Context,
+    recycle: bool = True
+) -> str:
+    """
+    Create a new scene from a pre-defined template.
+
+    Available templates: Movie Time, Dinner, Party, Relax, Concentrate,
+    Reading, Nightlight, Energize, Romantic, Wake Up
+
+    Use list_scene_templates() to see all available templates with descriptions.
+
+    Args:
+        template_name: Name of the template to use (case-insensitive, fuzzy matching)
+        scene_name: Name for the new scene
+        room_or_group_id: Room or group ID to apply the scene to
+        recycle: If True, scene can be auto-deleted to free space (default: True)
+
+    Returns:
+        Confirmation message with scene ID
+    """
+    bridge, _ = get_bridge_ctx(ctx)
+
+    try:
+        # Find matching template (case-insensitive, fuzzy)
+        template_dict = {name.lower(): (name, data) for name, data in SCENE_TEMPLATES.items()}
+        template_lower = template_name.lower()
+
+        # Try exact match first
+        if template_lower in template_dict:
+            actual_template_name, template_data = template_dict[template_lower]
+        else:
+            # Try fuzzy matching
+            template_search_dict = {name: {"name": name} for name in SCENE_TEMPLATES.keys()}
+            matches = find_similar_names(template_name, template_search_dict)
+
+            if not matches:
+                available = ", ".join(SCENE_TEMPLATES.keys())
+                return f"Error: Template '{template_name}' not found.\nAvailable templates: {available}\nUse list_scene_templates() for descriptions."
+
+            if len(matches) > 1 and matches[0][2] != 0:
+                suggestions = [f"'{m[1]}'" for m in matches[:3]]
+                return f"Multiple templates match '{template_name}'. Did you mean: {', '.join(suggestions)}?"
+
+            actual_template_name = matches[0][1]
+            template_data = SCENE_TEMPLATES[actual_template_name]
+
+        # Validate group/room ID
+        if not validate_group_id(room_or_group_id, bridge):
+            return f"Error: Group/Room with ID {room_or_group_id} not found."
+
+        # Get group info
+        group_info = bridge.groups[str(room_or_group_id)]()
+        group_name = group_info.get('name', f"Group {room_or_group_id}")
+        lights_in_group = group_info.get('lights', [])
+
+        if not lights_in_group:
+            return f"Error: Group '{group_name}' has no lights."
+
+        # Apply template state to all lights
+        light_states = {}
+        for light_id in lights_in_group:
+            light_states[light_id] = template_data["lights_state"].copy()
+
+        # Create the scene via API
+        import requests
+        result = requests.post(
+            f"http://{bridge.ip}/api/{bridge.username}/scenes",
+            json={
+                "name": scene_name,
+                "lights": lights_in_group,
+                "recycle": recycle,
+                "type": "GroupScene",
+                "group": str(room_or_group_id),
+                "lightstates": light_states
+            }
+        )
+
+        response = result.json()
+        if result.status_code == 200 and response and len(response) > 0:
+            scene_id = response[0].get('success', {}).get('id')
+            return f"Scene '{scene_name}' created from template '{actual_template_name}' with ID: {scene_id}\nApplied to {len(light_states)} lights in '{group_name}'.\n\nDescription: {template_data['description']}"
+        else:
+            error_msg = response[0].get('error', {}).get('description', 'Unknown error')
+            return f"Error creating scene: {error_msg}"
+
+    except Exception as e:
+        logger.error(f"Error creating scene from template '{template_name}': {e}")
         return f"Error: {str(e)}"
 
 # --- Prompts ---
