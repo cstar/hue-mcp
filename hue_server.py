@@ -30,7 +30,7 @@ from qhue import create_new_username
 from typing import Dict, List, Optional
 
 # Local modules
-from constants import DEFAULT_TRANSITION_TIME, VALID_ROOM_CLASSES, SCENE_TEMPLATES
+from constants import DEFAULT_TRANSITION_TIME, VALID_ROOM_CLASSES, SCENE_TEMPLATES, FUZZY_MATCH_THRESHOLD
 from models import HueContext
 from bridge import hue_lifespan
 from utils import (
