@@ -45,7 +45,7 @@ This server leverages the Model Context Protocol (MCP) to provide a seamless int
 
 ```bash
 # Install dependencies
-pip install phue mcp
+uv sync  # or: pip install qhue mcp
 
 # Run the server
 python hue_server.py
@@ -70,19 +70,28 @@ Then in Claude, start with: "I'd like to control my Philips Hue lights. Can you 
 2. Install the required dependencies:
 
 ```bash
-pip install phue mcp
+uv sync  # Recommended: uses uv package manager
+
+# Or use pip directly:
+pip install qhue mcp
 ```
 
 ### First Run
 
-1. Run the server:
+**Important:** Before running the MCP server, you must authenticate with your Hue bridge.
 
 ```bash
-python hue_server.py
+# Step 1: Authenticate (one-time setup)
+python test_connection.py
+# Press the link button on your Hue bridge when prompted
+
+# Step 2: Test the MCP server
+mcp dev hue_server.py
 ```
 
-2. When prompted, press the link button on your Hue bridge to authorize the connection
-3. Your connection details will be saved in `~/.hue-mcp/config.json` for future use
+Your authentication credentials will be saved in `~/.hue-mcp/config.json` for future use.
+
+For detailed setup instructions and troubleshooting, see [SETUP.md](SETUP.md).
 
 ## Using with Claude
 
@@ -219,7 +228,7 @@ python hue_server.py --host 0.0.0.0 --port 8888 --log-level debug
 
 ## How It Works
 
-This server connects to your Philips Hue bridge using the `phue` Python library and exposes functionality through the Model Context Protocol. When an AI like Claude connects:
+This server connects to your Philips Hue bridge using the `qhue` Python library and exposes functionality through the Model Context Protocol. When an AI like Claude connects:
 
 1. The server authenticates with your bridge using stored credentials
 2. It provides resources that describe your lighting setup
