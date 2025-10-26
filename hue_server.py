@@ -2386,6 +2386,609 @@ def create_scene_from_template(
         logger.error(f"Error creating scene from template '{template_name}': {e}")
         return f"Error: {str(e)}"
 
+# ============================================================================
+# DYNAMIC EFFECTS - Color Loops, Animations, and Time-Based Transitions
+# ============================================================================
+
+@mcp.tool()
+def start_color_loop(light_or_room_identifier: str, ctx: Context) -> str:
+    """
+    Start a color loop effect on a light or room.
+
+    The color loop cycles through all available colors continuously,
+    creating a dynamic rainbow effect.
+
+    Args:
+        light_or_room_identifier: Light ID, room ID, or fuzzy name (e.g., "39", "living room")
+
+    Returns:
+        Confirmation message
+    """
+    bridge, light_info = get_bridge_ctx(ctx)
+
+    try:
+        # Try to parse as light ID first
+        try:
+            light_id = int(light_or_room_identifier)
+            if validate_light_id(light_id, light_info):
+                # Turn on and start color loop
+                bridge.lights[str(light_id)].state(on=True, effect="colorloop")
+                light_name = light_info[str(light_id)]['name']
+                return f"Color loop started on light '{light_name}' (ID: {light_id})."
+        except ValueError:
+            pass
+
+        # Try as room name
+        groups = bridge.groups()
+        rooms = {gid: g for gid, g in groups.items() if g.get('type') == 'Room'}
+
+        if rooms:
+            room_matches = find_similar_names(light_or_room_identifier, rooms)
+
+            if room_matches and (len(room_matches) == 1 or room_matches[0][2] == 0):
+                room_id, room_name, _ = room_matches[0]
+                # Turn on and start color loop for room
+                bridge.groups[str(room_id)].action(on=True, effect="colorloop")
+                room_class = rooms[room_id].get('class', 'Room')
+                return f"Color loop started on {room_class} '{room_name}' (ID: {room_id})."
+
+        # Try as light name
+        light_matches = find_similar_names(light_or_room_identifier, light_info)
+
+        if light_matches and (len(light_matches) == 1 or light_matches[0][2] == 0):
+            light_id, light_name, _ = light_matches[0]
+            bridge.lights[str(light_id)].state(on=True, effect="colorloop")
+            return f"Color loop started on light '{light_name}' (ID: {light_id})."
+
+        return f"Error: No light or room found matching '{light_or_room_identifier}'.\nUse get_all_lights() or get_all_rooms() to see available options."
+
+    except Exception as e:
+        logger.error(f"Error starting color loop on '{light_or_room_identifier}': {e}")
+        return f"Error: {str(e)}"
+
+@mcp.tool()
+def stop_effect(light_or_room_identifier: str, ctx: Context) -> str:
+    """
+    Stop any active effect on a light or room.
+
+    This stops color loops or any other dynamic effects and returns
+    the light(s) to normal control mode.
+
+    Args:
+        light_or_room_identifier: Light ID, room ID, or fuzzy name
+
+    Returns:
+        Confirmation message
+    """
+    bridge, light_info = get_bridge_ctx(ctx)
+
+    try:
+        # Try to parse as light ID first
+        try:
+            light_id = int(light_or_room_identifier)
+            if validate_light_id(light_id, light_info):
+                bridge.lights[str(light_id)].state(effect="none")
+                light_name = light_info[str(light_id)]['name']
+                return f"Effect stopped on light '{light_name}' (ID: {light_id})."
+        except ValueError:
+            pass
+
+        # Try as room name
+        groups = bridge.groups()
+        rooms = {gid: g for gid, g in groups.items() if g.get('type') == 'Room'}
+
+        if rooms:
+            room_matches = find_similar_names(light_or_room_identifier, rooms)
+
+            if room_matches and (len(room_matches) == 1 or room_matches[0][2] == 0):
+                room_id, room_name, _ = room_matches[0]
+                bridge.groups[str(room_id)].action(effect="none")
+                room_class = rooms[room_id].get('class', 'Room')
+                return f"Effect stopped on {room_class} '{room_name}' (ID: {room_id})."
+
+        # Try as light name
+        light_matches = find_similar_names(light_or_room_identifier, light_info)
+
+        if light_matches and (len(light_matches) == 1 or light_matches[0][2] == 0):
+            light_id, light_name, _ = light_matches[0]
+            bridge.lights[str(light_id)].state(effect="none")
+            return f"Effect stopped on light '{light_name}' (ID: {light_id})."
+
+        return f"Error: No light or room found matching '{light_or_room_identifier}'."
+
+    except Exception as e:
+        logger.error(f"Error stopping effect on '{light_or_room_identifier}': {e}")
+        return f"Error: {str(e)}"
+
+@mcp.tool()
+def alert_blink(light_or_room_identifier: str, ctx: Context, duration: str = "select") -> str:
+    """
+    Make a light or room blink briefly for notification/alert.
+
+    Args:
+        light_or_room_identifier: Light ID, room ID, or fuzzy name
+        duration: "select" for single blink (default), "lselect" for 15 seconds of blinking
+
+    Returns:
+        Confirmation message
+    """
+    bridge, light_info = get_bridge_ctx(ctx)
+
+    if duration not in ["select", "lselect"]:
+        return "Error: duration must be 'select' (single blink) or 'lselect' (15 seconds)."
+
+    try:
+        # Try to parse as light ID first
+        try:
+            light_id = int(light_or_room_identifier)
+            if validate_light_id(light_id, light_info):
+                bridge.lights[str(light_id)].state(alert=duration)
+                light_name = light_info[str(light_id)]['name']
+                blink_desc = "single blink" if duration == "select" else "15 seconds of blinking"
+                return f"Alert triggered on light '{light_name}' ({blink_desc})."
+        except ValueError:
+            pass
+
+        # Try as room name
+        groups = bridge.groups()
+        rooms = {gid: g for gid, g in groups.items() if g.get('type') == 'Room'}
+
+        if rooms:
+            room_matches = find_similar_names(light_or_room_identifier, rooms)
+
+            if room_matches and (len(room_matches) == 1 or room_matches[0][2] == 0):
+                room_id, room_name, _ = room_matches[0]
+                bridge.groups[str(room_id)].action(alert=duration)
+                room_class = rooms[room_id].get('class', 'Room')
+                blink_desc = "single blink" if duration == "select" else "15 seconds of blinking"
+                return f"Alert triggered on {room_class} '{room_name}' ({blink_desc})."
+
+        # Try as light name
+        light_matches = find_similar_names(light_or_room_identifier, light_info)
+
+        if light_matches and (len(light_matches) == 1 or light_matches[0][2] == 0):
+            light_id, light_name, _ = light_matches[0]
+            bridge.lights[str(light_id)].state(alert=duration)
+            blink_desc = "single blink" if duration == "select" else "15 seconds of blinking"
+            return f"Alert triggered on light '{light_name}' ({blink_desc})."
+
+        return f"Error: No light or room found matching '{light_or_room_identifier}'."
+
+    except Exception as e:
+        logger.error(f"Error triggering alert on '{light_or_room_identifier}': {e}")
+        return f"Error: {str(e)}"
+
+@mcp.tool()
+def breathing_effect(
+    light_or_room_identifier: str,
+    ctx: Context,
+    color_temp: int = 2700,
+    min_brightness: int = 50,
+    max_brightness: int = 200,
+    duration_seconds: int = 60
+) -> str:
+    """
+    Create a breathing/pulsing effect by gradually changing brightness.
+
+    Note: This creates a sequence of transitions. The light will pulse
+    between min and max brightness for the specified duration.
+
+    Args:
+        light_or_room_identifier: Light ID, room ID, or fuzzy name
+        color_temp: Color temperature in Kelvin (2000-6500)
+        min_brightness: Minimum brightness (0-254)
+        max_brightness: Maximum brightness (0-254)
+        duration_seconds: How long to run the effect (default: 60s)
+
+    Returns:
+        Confirmation message with instructions
+    """
+    bridge, light_info = get_bridge_ctx(ctx)
+
+    # Validate parameters
+    if not 0 <= min_brightness <= 254 or not 0 <= max_brightness <= 254:
+        return "Error: Brightness must be between 0 and 254."
+    if min_brightness >= max_brightness:
+        return "Error: min_brightness must be less than max_brightness."
+    if not 2000 <= color_temp <= 6500:
+        return "Error: Color temperature must be between 2000K and 6500K."
+
+    try:
+        # Calculate mired for color temperature
+        mired = int(1000000 / color_temp)
+
+        # Determine if working with light or room
+        target_id = None
+        target_name = None
+        is_room = False
+
+        # Try to parse as light ID first
+        try:
+            light_id = int(light_or_room_identifier)
+            if validate_light_id(light_id, light_info):
+                target_id = light_id
+                target_name = light_info[str(light_id)]['name']
+        except ValueError:
+            pass
+
+        if not target_id:
+            # Try as room name
+            groups = bridge.groups()
+            rooms = {gid: g for gid, g in groups.items() if g.get('type') == 'Room'}
+
+            if rooms:
+                room_matches = find_similar_names(light_or_room_identifier, rooms)
+
+                if room_matches and (len(room_matches) == 1 or room_matches[0][2] == 0):
+                    target_id, target_name, _ = room_matches[0]
+                    is_room = True
+
+        if not target_id:
+            # Try as light name
+            light_matches = find_similar_names(light_or_room_identifier, light_info)
+
+            if light_matches and (len(light_matches) == 1 or light_matches[0][2] == 0):
+                target_id, target_name, _ = light_matches[0]
+
+        if not target_id:
+            return f"Error: No light or room found matching '{light_or_room_identifier}'."
+
+        # Calculate transition time (breathing cycle in deciseconds)
+        # One breath cycle = fade up + fade down
+        cycle_time = 40  # 4 seconds per cycle (2s up, 2s down)
+
+        # Set initial state and start first transition
+        if is_room:
+            bridge.groups[str(target_id)].action(on=True, ct=mired, bri=min_brightness)
+            # First transition: fade up
+            bridge.groups[str(target_id)].action(bri=max_brightness, transitiontime=cycle_time // 2)
+        else:
+            bridge.lights[str(target_id)].state(on=True, ct=mired, bri=min_brightness)
+            # First transition: fade up
+            bridge.lights[str(target_id)].state(bri=max_brightness, transitiontime=cycle_time // 2)
+
+        cycles = duration_seconds // 4  # Approximate number of cycles
+        target_type = "room" if is_room else "light"
+
+        return f"Breathing effect started on {target_type} '{target_name}'.\n" \
+               f"Pulsing between {min_brightness} and {max_brightness} brightness at {color_temp}K.\n" \
+               f"Running for approximately {duration_seconds} seconds ({cycles} cycles).\n\n" \
+               f"Note: This starts the first transition. To create a continuous effect, " \
+               f"you would need to call this repeatedly or use stop_effect() to halt at any time."
+
+    except Exception as e:
+        logger.error(f"Error creating breathing effect on '{light_or_room_identifier}': {e}")
+        return f"Error: {str(e)}"
+
+
+@mcp.tool()
+def sunrise_simulation(
+    light_or_room_identifier: str,
+    ctx: Context,
+    duration_minutes: int = 30,
+    final_brightness: int = 254,
+    final_temp: int = 4000
+) -> str:
+    """
+    Simulate a sunrise by gradually increasing brightness and color temperature.
+    Perfect for natural wake-up routines.
+
+    Args:
+        light_or_room_identifier: Light ID, room name, or light name
+        ctx: MCP Context
+        duration_minutes: Duration of sunrise simulation (default: 30 minutes)
+        final_brightness: Target brightness at sunrise completion (1-254, default: 254)
+        final_temp: Target color temperature in Kelvin (2000-6500, default: 4000K warm daylight)
+
+    Returns:
+        Success or error message with simulation details
+    """
+    bridge, light_info = get_bridge_ctx(ctx)
+
+    try:
+        # Try parsing as light ID first
+        try:
+            light_id = int(light_or_room_identifier)
+            if not validate_light_id(light_id, light_info):
+                return f"Error: Light with ID {light_id} not found."
+            target_id = light_id
+            target_name = light_info[str(light_id)]['name']
+            is_room = False
+        except ValueError:
+            # Try room matching
+            groups = bridge.groups()
+            room_matches = find_similar_names(light_or_room_identifier, groups, threshold=FUZZY_MATCH_THRESHOLD)
+            if room_matches:
+                target_id = int(room_matches[0][0])
+                target_name = room_matches[0][1]
+                is_room = True
+            else:
+                # Try light name matching
+                light_matches = find_similar_names(light_or_room_identifier, light_info, threshold=FUZZY_MATCH_THRESHOLD)
+                if light_matches:
+                    target_id = int(light_matches[0][0])
+                    target_name = light_matches[0][1]
+                    is_room = False
+                else:
+                    return f"Error: No light or room found matching '{light_or_room_identifier}'."
+
+        # Validate parameters
+        if not (1 <= final_brightness <= 254):
+            return "Error: Brightness must be between 1 and 254."
+        if not (2000 <= final_temp <= 6500):
+            return "Error: Color temperature must be between 2000K and 6500K."
+        if duration_minutes < 1:
+            return "Error: Duration must be at least 1 minute."
+
+        # Convert temperature to mired
+        final_mired = int(1000000 / final_temp)
+        # Start with very warm, very dim
+        start_mired = int(1000000 / 2000)  # 2000K - very warm
+        start_brightness = 1  # Minimum brightness
+
+        # Convert duration to deciseconds (Hue API unit)
+        transition_time = duration_minutes * 600  # 600 deciseconds per minute
+
+        # Set initial state
+        if is_room:
+            bridge.groups[str(target_id)].action(on=True, ct=start_mired, bri=start_brightness)
+        else:
+            bridge.lights[str(target_id)].state(on=True, ct=start_mired, bri=start_brightness)
+
+        # Start gradual transition to final state
+        if is_room:
+            bridge.groups[str(target_id)].action(ct=final_mired, bri=final_brightness, transitiontime=transition_time)
+        else:
+            bridge.lights[str(target_id)].state(ct=final_mired, bri=final_brightness, transitiontime=transition_time)
+
+        target_type = "room" if is_room else "light"
+        return f"Sunrise simulation started on {target_type} '{target_name}'.\n" \
+               f"Gradually transitioning from 2000K (dim warm) to {final_temp}K (bright {final_brightness}/254).\n" \
+               f"Duration: {duration_minutes} minutes.\n\n" \
+               f"Perfect for natural wake-up routines!"
+
+    except Exception as e:
+        logger.error(f"Error starting sunrise simulation on '{light_or_room_identifier}': {e}")
+        return f"Error: {str(e)}"
+
+
+@mcp.tool()
+def sunset_simulation(
+    light_or_room_identifier: str,
+    ctx: Context,
+    duration_minutes: int = 30,
+    final_brightness: int = 10,
+    final_temp: int = 2000
+) -> str:
+    """
+    Simulate a sunset by gradually decreasing brightness and warming color temperature.
+    Perfect for relaxing evening routines and preparing for sleep.
+
+    Args:
+        light_or_room_identifier: Light ID, room name, or light name
+        ctx: MCP Context
+        duration_minutes: Duration of sunset simulation (default: 30 minutes)
+        final_brightness: Target brightness at sunset completion (1-254, default: 10 very dim)
+        final_temp: Target color temperature in Kelvin (2000-6500, default: 2000K very warm)
+
+    Returns:
+        Success or error message with simulation details
+    """
+    bridge, light_info = get_bridge_ctx(ctx)
+
+    try:
+        # Try parsing as light ID first
+        try:
+            light_id = int(light_or_room_identifier)
+            if not validate_light_id(light_id, light_info):
+                return f"Error: Light with ID {light_id} not found."
+            target_id = light_id
+            target_name = light_info[str(light_id)]['name']
+            is_room = False
+        except ValueError:
+            # Try room matching
+            groups = bridge.groups()
+            room_matches = find_similar_names(light_or_room_identifier, groups, threshold=FUZZY_MATCH_THRESHOLD)
+            if room_matches:
+                target_id = int(room_matches[0][0])
+                target_name = room_matches[0][1]
+                is_room = True
+            else:
+                # Try light name matching
+                light_matches = find_similar_names(light_or_room_identifier, light_info, threshold=FUZZY_MATCH_THRESHOLD)
+                if light_matches:
+                    target_id = int(light_matches[0][0])
+                    target_name = light_matches[0][1]
+                    is_room = False
+                else:
+                    return f"Error: No light or room found matching '{light_or_room_identifier}'."
+
+        # Validate parameters
+        if not (1 <= final_brightness <= 254):
+            return "Error: Brightness must be between 1 and 254."
+        if not (2000 <= final_temp <= 6500):
+            return "Error: Color temperature must be between 2000K and 6500K."
+        if duration_minutes < 1:
+            return "Error: Duration must be at least 1 minute."
+
+        # Convert temperature to mired
+        final_mired = int(1000000 / final_temp)
+
+        # Get current state to start from
+        if is_room:
+            current_state = bridge.groups[str(target_id)]()
+            if 'action' in current_state:
+                current_bri = current_state['action'].get('bri', 254)
+                current_ct = current_state['action'].get('ct', int(1000000 / 4000))
+        else:
+            current_state = bridge.lights[str(target_id)]()
+            if 'state' in current_state:
+                current_bri = current_state['state'].get('bri', 254)
+                current_ct = current_state['state'].get('ct', int(1000000 / 4000))
+
+        # Convert duration to deciseconds (Hue API unit)
+        transition_time = duration_minutes * 600  # 600 deciseconds per minute
+
+        # Ensure light is on at current state
+        if is_room:
+            bridge.groups[str(target_id)].action(on=True)
+        else:
+            bridge.lights[str(target_id)].state(on=True)
+
+        # Start gradual transition to final state
+        if is_room:
+            bridge.groups[str(target_id)].action(ct=final_mired, bri=final_brightness, transitiontime=transition_time)
+        else:
+            bridge.lights[str(target_id)].state(ct=final_mired, bri=final_brightness, transitiontime=transition_time)
+
+        target_type = "room" if is_room else "light"
+        return f"Sunset simulation started on {target_type} '{target_name}'.\n" \
+               f"Gradually transitioning to {final_temp}K (very warm) with brightness {final_brightness}/254.\n" \
+               f"Duration: {duration_minutes} minutes.\n\n" \
+               f"Perfect for relaxing evening routines!"
+
+    except Exception as e:
+        logger.error(f"Error starting sunset simulation on '{light_or_room_identifier}': {e}")
+        return f"Error: {str(e)}"
+
+
+@mcp.tool()
+def strobe_effect(
+    light_or_room_identifier: str,
+    ctx: Context,
+    speed: str = "medium"
+) -> str:
+    """
+    Create a strobe/flashing effect for party or alert scenarios.
+    WARNING: Rapid flashing lights may cause discomfort or trigger photosensitive conditions.
+
+    Args:
+        light_or_room_identifier: Light ID, room name, or light name
+        ctx: MCP Context
+        speed: Strobe speed - "slow" (2 sec cycle), "medium" (1 sec cycle), or "fast" (0.5 sec cycle)
+
+    Returns:
+        Success or error message with strobe details
+    """
+    bridge, light_info = get_bridge_ctx(ctx)
+
+    try:
+        # Try parsing as light ID first
+        try:
+            light_id = int(light_or_room_identifier)
+            if not validate_light_id(light_id, light_info):
+                return f"Error: Light with ID {light_id} not found."
+            target_id = light_id
+            target_name = light_info[str(light_id)]['name']
+            is_room = False
+        except ValueError:
+            # Try room matching
+            groups = bridge.groups()
+            room_matches = find_similar_names(light_or_room_identifier, groups, threshold=FUZZY_MATCH_THRESHOLD)
+            if room_matches:
+                target_id = int(room_matches[0][0])
+                target_name = room_matches[0][1]
+                is_room = True
+            else:
+                # Try light name matching
+                light_matches = find_similar_names(light_or_room_identifier, light_info, threshold=FUZZY_MATCH_THRESHOLD)
+                if light_matches:
+                    target_id = int(light_matches[0][0])
+                    target_name = light_matches[0][1]
+                    is_room = False
+                else:
+                    return f"Error: No light or room found matching '{light_or_room_identifier}'."
+
+        # Validate speed parameter
+        speed_map = {
+            "slow": 20,      # 2 seconds (20 deciseconds)
+            "medium": 10,    # 1 second (10 deciseconds)
+            "fast": 5        # 0.5 seconds (5 deciseconds)
+        }
+
+        if speed not in speed_map:
+            return f"Error: Speed must be 'slow', 'medium', or 'fast'. Got: '{speed}'"
+
+        transition_time = speed_map[speed]
+
+        # Start strobe by rapidly toggling brightness
+        # First, turn on at full brightness
+        if is_room:
+            bridge.groups[str(target_id)].action(on=True, bri=254, transitiontime=0)
+            # Then transition to off (bri=1, can't use on=False for smooth strobe)
+            bridge.groups[str(target_id)].action(bri=1, transitiontime=transition_time)
+        else:
+            bridge.lights[str(target_id)].state(on=True, bri=254, transitiontime=0)
+            bridge.lights[str(target_id)].state(bri=1, transitiontime=transition_time)
+
+        target_type = "room" if is_room else "light"
+        return f"Strobe effect initiated on {target_type} '{target_name}' at {speed} speed.\n" \
+               f"Cycle time: {transition_time / 10} seconds.\n\n" \
+               f"⚠️  WARNING: Rapid flashing may cause discomfort.\n" \
+               f"Use stop_effect() to halt the strobe.\n\n" \
+               f"Note: This starts one strobe cycle. For continuous strobing, " \
+               f"you would need to call this repeatedly or use stop_effect() to halt."
+
+    except Exception as e:
+        logger.error(f"Error creating strobe effect on '{light_or_room_identifier}': {e}")
+        return f"Error: {str(e)}"
+
+
+@mcp.tool()
+def get_active_effects(ctx: Context) -> str:
+    """
+    Check which lights currently have active effects running.
+    Shows lights with colorloop, alert, or other special effects enabled.
+
+    Args:
+        ctx: MCP Context
+
+    Returns:
+        JSON string with lights that have active effects
+    """
+    bridge, light_info = get_bridge_ctx(ctx)
+
+    try:
+        active_effects = {}
+
+        # Check each light for active effects
+        for light_id, light in light_info.items():
+            light_state = bridge.lights[light_id]()
+            state = light_state.get('state', {})
+
+            effect = state.get('effect', 'none')
+            alert = state.get('alert', 'none')
+
+            # Check if any effect is active
+            if effect != 'none' or alert != 'none':
+                active_effects[light_id] = {
+                    'name': light['name'],
+                    'effect': effect,
+                    'alert': alert,
+                    'on': state.get('on', False),
+                    'brightness': state.get('bri'),
+                    'reachable': state.get('reachable', True)
+                }
+
+        if not active_effects:
+            return "No lights currently have active effects."
+
+        result = f"Found {len(active_effects)} light(s) with active effects:\n\n"
+        for light_id, info in active_effects.items():
+            result += f"Light {light_id} - {info['name']}:\n"
+            if info['effect'] != 'none':
+                result += f"  Effect: {info['effect']}\n"
+            if info['alert'] != 'none':
+                result += f"  Alert: {info['alert']}\n"
+            result += f"  On: {info['on']}, Brightness: {info['brightness']}\n\n"
+
+        return result.strip()
+
+    except Exception as e:
+        logger.error(f"Error getting active effects: {e}")
+        return f"Error: {str(e)}"
+
+
 # --- Prompts ---
 
 @mcp.prompt()
