@@ -27,7 +27,7 @@ import logging
 # Third-party
 from mcp.server.fastmcp import FastMCP, Context
 from qhue import create_new_username
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 # Local modules
 from constants import DEFAULT_TRANSITION_TIME, VALID_ROOM_CLASSES
