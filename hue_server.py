@@ -42,6 +42,22 @@ logging.basicConfig(level=logging.INFO,
                    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("hue-mcp")
 
+# --- Constants ---
+
+# Default values for operations
+DEFAULT_TRANSITION_TIME = 4  # Transition time in deciseconds (0.4 seconds)
+FUZZY_MATCH_THRESHOLD = 3    # Maximum Levenshtein distance for fuzzy name matching
+
+# Valid room classes for Philips Hue
+VALID_ROOM_CLASSES = (
+    "Living room", "Kitchen", "Dining", "Bedroom", "Kids bedroom", "Bathroom",
+    "Nursery", "Recreation", "Office", "Gym", "Hallway", "Toilet", "Front door",
+    "Garage", "Terrace", "Garden", "Driveway", "Carport", "Home", "Downstairs",
+    "Upstairs", "Top floor", "Attic", "Guest room", "Staircase", "Lounge",
+    "Man cave", "Computer", "Studio", "Music", "TV", "Reading", "Closet",
+    "Storage", "Laundry room", "Balcony", "Porch", "Barbecue", "Pool", "Other"
+)
+
 # --- Helper Functions ---
 
 def discover_bridge() -> Optional[str]:
@@ -204,6 +220,27 @@ def rgb_to_xy(r: int, g: int, b: int) -> List[float]:
     
     return [x, y]
 
+# Color presets for lights (defined after rgb_to_xy is available)
+COLOR_PRESETS = {
+    # White temperature presets
+    "warm": {"ct": 2500},  # Warm white (2500K)
+    "cool": {"ct": 4500},  # Cool white (4500K)
+    "daylight": {"ct": 6500},  # Daylight (6500K)
+
+    # Activity presets (Philips recommended settings)
+    "concentration": {"ct": 4600, "bri": 254},  # Bright cool light
+    "relax": {"ct": 2700, "bri": 144},  # Warm dimmed light
+    "reading": {"ct": 3200, "bri": 219},  # Moderate neutral light
+    "energize": {"ct": 6000, "bri": 254},  # Bright blue light
+
+    # Color presets
+    "red": {"xy": rgb_to_xy(255, 0, 0)},
+    "green": {"xy": rgb_to_xy(0, 255, 0)},
+    "blue": {"xy": rgb_to_xy(0, 0, 255)},
+    "purple": {"xy": rgb_to_xy(128, 0, 128)},
+    "orange": {"xy": rgb_to_xy(255, 165, 0)},
+}
+
 def validate_light_id(light_id: int, light_info: Dict) -> bool:
     """Validate that a light ID exists."""
     return str(light_id) in light_info
@@ -213,7 +250,7 @@ def validate_group_id(group_id: int, bridge: Bridge) -> bool:
     groups = bridge.groups()
     return str(group_id) in groups
 
-def find_similar_names(search_name: str, items: Dict, threshold: int = 3) -> List[tuple]:
+def find_similar_names(search_name: str, items: Dict, threshold: int = FUZZY_MATCH_THRESHOLD) -> List[tuple]:
     """
     Find items with names similar to the search term using Levenshtein distance.
 
@@ -322,7 +359,7 @@ def find_light_by_name_fuzzy(name: str, light_info: Dict) -> Optional[tuple]:
     Returns:
         Tuple of (light_id, light_name) if found, None otherwise
     """
-    matches = find_similar_names(name, light_info, threshold=3)
+    matches = find_similar_names(name, light_info, threshold=FUZZY_MATCH_THRESHOLD)
     return (matches[0][0], matches[0][1]) if matches else None
 
 def find_group_by_name_fuzzy(name: str, bridge: Bridge) -> Optional[tuple]:
@@ -336,7 +373,7 @@ def find_group_by_name_fuzzy(name: str, bridge: Bridge) -> Optional[tuple]:
         Tuple of (group_id, group_name) if found, None otherwise
     """
     groups = bridge.groups()
-    matches = find_similar_names(name, groups, threshold=3)
+    matches = find_similar_names(name, groups, threshold=FUZZY_MATCH_THRESHOLD)
     return (matches[0][0], matches[0][1]) if matches else None
 
 # qhue API notes:
@@ -562,7 +599,7 @@ def control_light_by_name(name: str, on: bool, ctx: Context) -> str:
 
     try:
         # Find matching lights
-        matches = find_similar_names(name, light_info, threshold=3)
+        matches = find_similar_names(name, light_info, threshold=FUZZY_MATCH_THRESHOLD)
 
         if not matches:
             return f"Error: No lights found matching '{name}'.\nUse get_all_lights() to see available lights."
@@ -600,7 +637,7 @@ def control_group_by_name(name: str, on: bool, ctx: Context) -> str:
         groups = bridge.groups()
 
         # Find matching groups
-        matches = find_similar_names(name, groups, threshold=3)
+        matches = find_similar_names(name, groups, threshold=FUZZY_MATCH_THRESHOLD)
 
         if not matches:
             return f"Error: No groups found matching '{name}'.\nUse get_all_groups() to see available groups."
@@ -621,7 +658,7 @@ def control_group_by_name(name: str, on: bool, ctx: Context) -> str:
         return f"Error: {str(e)}"
 
 @mcp.tool()
-def set_brightness(light_id: int, brightness: int, ctx: Context, transition_time: int = 4) -> str:
+def set_brightness(light_id: int, brightness: int, ctx: Context, transition_time: int = DEFAULT_TRANSITION_TIME) -> str:
     """
     Set the brightness of a light with optional smooth transition.
 
@@ -661,7 +698,7 @@ def set_brightness(light_id: int, brightness: int, ctx: Context, transition_time
         return f"Error: {str(e)}"
 
 @mcp.tool()
-def set_color_rgb(light_id: int, red: int, green: int, blue: int, ctx: Context, transition_time: int = 4) -> str:
+def set_color_rgb(light_id: int, red: int, green: int, blue: int, ctx: Context, transition_time: int = DEFAULT_TRANSITION_TIME) -> str:
     """
     Set light color using RGB values with optional smooth transition.
 
@@ -761,7 +798,7 @@ def turn_off_group(group_id: int, ctx: Context) -> str:
         return f"Error: {str(e)}"
 
 @mcp.tool()
-def set_group_brightness(group_id: int, brightness: int, ctx: Context, transition_time: int = 4) -> str:
+def set_group_brightness(group_id: int, brightness: int, ctx: Context, transition_time: int = DEFAULT_TRANSITION_TIME) -> str:
     """
     Set the brightness of all lights in a group with optional smooth transition.
 
@@ -805,7 +842,7 @@ def set_group_brightness(group_id: int, brightness: int, ctx: Context, transitio
         return f"Error: {str(e)}"
 
 @mcp.tool()
-def set_group_color_rgb(group_id: int, red: int, green: int, blue: int, ctx: Context, transition_time: int = 4) -> str:
+def set_group_color_rgb(group_id: int, red: int, green: int, blue: int, ctx: Context, transition_time: int = DEFAULT_TRANSITION_TIME) -> str:
     """
     Set color for all lights in a group using RGB values with optional smooth transition.
 
@@ -1073,60 +1110,39 @@ def set_color_preset(
 ) -> str:
     """
     Apply a color preset to a light.
-    
+
     Args:
         light_id: The ID of the light
-        preset: Color preset name (warm, cool, daylight, concentration, 
+        preset: Color preset name (warm, cool, daylight, concentration,
                 relax, reading, energize, red, green, blue, purple, orange)
-        
+
     Returns:
         Confirmation message
     """
-    # Define color presets with RGB values
-    presets = {
-        # White temperature presets
-        "warm": {"ct": 2500},  # Warm white (2500K)
-        "cool": {"ct": 4500},  # Cool white (4500K)
-        "daylight": {"ct": 6500},  # Daylight (6500K)
-        
-        # Activity presets (Philips recommended settings)
-        "concentration": {"ct": 4600, "bri": 254},  # Bright cool light
-        "relax": {"ct": 2700, "bri": 144},  # Warm dimmed light
-        "reading": {"ct": 3200, "bri": 219},  # Moderate neutral light
-        "energize": {"ct": 6000, "bri": 254},  # Bright blue light
-        
-        # Color presets
-        "red": {"xy": rgb_to_xy(255, 0, 0)},
-        "green": {"xy": rgb_to_xy(0, 255, 0)},
-        "blue": {"xy": rgb_to_xy(0, 0, 255)},
-        "purple": {"xy": rgb_to_xy(128, 0, 128)},
-        "orange": {"xy": rgb_to_xy(255, 165, 0)},
-    }
-    
-    if preset not in presets:
-        return f"Error: Unknown preset. Available presets: {', '.join(presets.keys())}"
-    
+    if preset not in COLOR_PRESETS:
+        return f"Error: Unknown preset. Available presets: {', '.join(COLOR_PRESETS.keys())}"
+
     bridge, light_info = get_bridge_ctx(ctx)
-    
+
     try:
         # Validate light ID
         if not validate_light_id(light_id, light_info):
             return f"Error: Light with ID {light_id} not found."
-        
+
         # Check capability for color temperature
-        if "ct" in presets[preset] and 'ct' not in light_info[str(light_id)]['state']:
+        if "ct" in COLOR_PRESETS[preset] and 'ct' not in light_info[str(light_id)]['state']:
             return f"Error: Light {light_id} does not support color temperature."
-        
+
         # Check capability for xy color
-        if "xy" in presets[preset] and 'xy' not in light_info[str(light_id)]['state']:
+        if "xy" in COLOR_PRESETS[preset] and 'xy' not in light_info[str(light_id)]['state']:
             return f"Error: Light {light_id} does not support color."
-        
+
         # Turn on the light if it's off
         if not light_info[str(light_id)]['state']['on']:
             bridge.lights[str(light_id)].state(on=True)
 
         # Apply preset settings
-        for key, value in presets[preset].items():
+        for key, value in COLOR_PRESETS[preset].items():
             bridge.lights[str(light_id)].state(**{key: value})
         
         return f"Applied '{preset}' preset to light {light_id} ({light_info[str(light_id)]['name']})."
@@ -1142,38 +1158,17 @@ def set_group_color_preset(
 ) -> str:
     """
     Apply a color preset to a group.
-    
+
     Args:
         group_id: The ID of the group
-        preset: Color preset name (warm, cool, daylight, concentration, 
+        preset: Color preset name (warm, cool, daylight, concentration,
                 relax, reading, energize, red, green, blue, purple, orange)
-        
+
     Returns:
         Confirmation message
     """
-    # Define color presets with RGB values (same as in set_color_preset)
-    presets = {
-        # White temperature presets
-        "warm": {"ct": 2500},  # Warm white (2500K)
-        "cool": {"ct": 4500},  # Cool white (4500K)
-        "daylight": {"ct": 6500},  # Daylight (6500K)
-        
-        # Activity presets (Philips recommended settings)
-        "concentration": {"ct": 4600, "bri": 254},  # Bright cool light
-        "relax": {"ct": 2700, "bri": 144},  # Warm dimmed light
-        "reading": {"ct": 3200, "bri": 219},  # Moderate neutral light
-        "energize": {"ct": 6000, "bri": 254},  # Bright blue light
-        
-        # Color presets
-        "red": {"xy": rgb_to_xy(255, 0, 0)},
-        "green": {"xy": rgb_to_xy(0, 255, 0)},
-        "blue": {"xy": rgb_to_xy(0, 0, 255)},
-        "purple": {"xy": rgb_to_xy(128, 0, 128)},
-        "orange": {"xy": rgb_to_xy(255, 165, 0)},
-    }
-    
-    if preset not in presets:
-        return f"Error: Unknown preset. Available presets: {', '.join(presets.keys())}"
+    if preset not in COLOR_PRESETS:
+        return f"Error: Unknown preset. Available presets: {', '.join(COLOR_PRESETS.keys())}"
     
     bridge, _ = get_bridge_ctx(ctx)
     
@@ -1191,7 +1186,7 @@ def set_group_color_preset(
             bridge.groups[str(group_id)].action(on=True)
         
         # Apply preset settings
-        for key, value in presets[preset].items():
+        for key, value in COLOR_PRESETS[preset].items():
             bridge.groups[str(group_id)].action(**{key: value})
         
         return f"Applied '{preset}' preset to group '{group_name}'."
@@ -1702,7 +1697,7 @@ def get_room(room_identifier: str, ctx: Context) -> str:
 
         # Try as name with fuzzy matching
         rooms = {gid: g for gid, g in groups.items() if g.get('type') == 'Room'}
-        matches = find_similar_names(room_identifier, rooms, threshold=3)
+        matches = find_similar_names(room_identifier, rooms, threshold=FUZZY_MATCH_THRESHOLD)
 
         if not matches:
             return f"Error: No room found matching '{room_identifier}'.\nUse get_all_rooms() to see available rooms."
@@ -1807,7 +1802,7 @@ def control_room(room_name: str, on: bool, ctx: Context) -> str:
             return "No rooms found. Rooms can be created in the Hue app or using create_room()."
 
         # Find matching rooms
-        matches = find_similar_names(room_name, rooms, threshold=3)
+        matches = find_similar_names(room_name, rooms, threshold=FUZZY_MATCH_THRESHOLD)
 
         if not matches:
             return f"Error: No room found matching '{room_name}'.\nUse get_all_rooms() to see available rooms."
@@ -1829,7 +1824,7 @@ def control_room(room_name: str, on: bool, ctx: Context) -> str:
         return f"Error: {str(e)}"
 
 @mcp.tool()
-def set_room_brightness(room_name: str, brightness: int, ctx: Context, transition_time: int = 4) -> str:
+def set_room_brightness(room_name: str, brightness: int, ctx: Context, transition_time: int = DEFAULT_TRANSITION_TIME) -> str:
     """
     Set the brightness of all lights in a room by name.
 
@@ -1857,7 +1852,7 @@ def set_room_brightness(room_name: str, brightness: int, ctx: Context, transitio
             return "No rooms found. Rooms can be created in the Hue app or using create_room()."
 
         # Find matching rooms
-        matches = find_similar_names(room_name, rooms, threshold=3)
+        matches = find_similar_names(room_name, rooms, threshold=FUZZY_MATCH_THRESHOLD)
 
         if not matches:
             return f"Error: No room found matching '{room_name}'.\nUse get_all_rooms() to see available rooms."
@@ -1886,7 +1881,7 @@ def set_room_brightness(room_name: str, brightness: int, ctx: Context, transitio
         return f"Error: {str(e)}"
 
 @mcp.tool()
-def set_room_color(room_name: str, red: int, green: int, blue: int, ctx: Context, transition_time: int = 4) -> str:
+def set_room_color(room_name: str, red: int, green: int, blue: int, ctx: Context, transition_time: int = DEFAULT_TRANSITION_TIME) -> str:
     """
     Set the color of all lights in a room by name.
 
@@ -1916,7 +1911,7 @@ def set_room_color(room_name: str, red: int, green: int, blue: int, ctx: Context
             return "No rooms found. Rooms can be created in the Hue app or using create_room()."
 
         # Find matching rooms
-        matches = find_similar_names(room_name, rooms, threshold=3)
+        matches = find_similar_names(room_name, rooms, threshold=FUZZY_MATCH_THRESHOLD)
 
         if not matches:
             return f"Error: No room found matching '{room_name}'.\nUse get_all_rooms() to see available rooms."
@@ -1956,24 +1951,8 @@ def set_room_preset(room_name: str, preset: str, ctx: Context) -> str:
     Returns:
         Confirmation message
     """
-    # Define presets (same as individual light presets)
-    presets = {
-        "warm": {"ct": 2500},
-        "cool": {"ct": 4500},
-        "daylight": {"ct": 6500},
-        "concentration": {"ct": 4600, "bri": 254},
-        "relax": {"ct": 2700, "bri": 144},
-        "reading": {"ct": 3200, "bri": 219},
-        "energize": {"ct": 6000, "bri": 254},
-        "red": {"xy": rgb_to_xy(255, 0, 0)},
-        "green": {"xy": rgb_to_xy(0, 255, 0)},
-        "blue": {"xy": rgb_to_xy(0, 0, 255)},
-        "purple": {"xy": rgb_to_xy(128, 0, 128)},
-        "orange": {"xy": rgb_to_xy(255, 165, 0)},
-    }
-
-    if preset not in presets:
-        return f"Error: Unknown preset. Available presets: {', '.join(presets.keys())}"
+    if preset not in COLOR_PRESETS:
+        return f"Error: Unknown preset. Available presets: {', '.join(COLOR_PRESETS.keys())}"
 
     bridge, _ = get_bridge_ctx(ctx)
 
@@ -1985,7 +1964,7 @@ def set_room_preset(room_name: str, preset: str, ctx: Context) -> str:
             return "No rooms found. Rooms can be created in the Hue app or using create_room()."
 
         # Find matching rooms
-        matches = find_similar_names(room_name, rooms, threshold=3)
+        matches = find_similar_names(room_name, rooms, threshold=FUZZY_MATCH_THRESHOLD)
 
         if not matches:
             return f"Error: No room found matching '{room_name}'.\nUse get_all_rooms() to see available rooms."
@@ -1999,7 +1978,7 @@ def set_room_preset(room_name: str, preset: str, ctx: Context) -> str:
                 bridge.groups[str(room_id)].action(on=True)
 
             # Apply preset
-            for key, value in presets[preset].items():
+            for key, value in COLOR_PRESETS[preset].items():
                 bridge.groups[str(room_id)].action(**{key: value})
 
             room_class = room.get('class', 'Room')
@@ -2112,7 +2091,7 @@ def add_lights_to_room(room_identifier: str, light_ids: List[int], ctx: Context)
             room_name = rooms[room_id]['name']
         else:
             # Try name matching
-            matches = find_similar_names(room_identifier, rooms, threshold=3)
+            matches = find_similar_names(room_identifier, rooms, threshold=FUZZY_MATCH_THRESHOLD)
             if not matches:
                 return f"Error: No room found matching '{room_identifier}'."
             if len(matches) > 1 and matches[0][2] != 0:
@@ -2170,7 +2149,7 @@ def remove_lights_from_room(room_identifier: str, light_ids: List[int], ctx: Con
             room_id = room_identifier
             room_name = rooms[room_id]['name']
         else:
-            matches = find_similar_names(room_identifier, rooms, threshold=3)
+            matches = find_similar_names(room_identifier, rooms, threshold=FUZZY_MATCH_THRESHOLD)
             if not matches:
                 return f"Error: No room found matching '{room_identifier}'."
             if len(matches) > 1 and matches[0][2] != 0:
@@ -2231,7 +2210,7 @@ def delete_room(room_identifier: str, ctx: Context) -> str:
             room_id = room_identifier
             room_name = rooms[room_id]['name']
         else:
-            matches = find_similar_names(room_identifier, rooms, threshold=3)
+            matches = find_similar_names(room_identifier, rooms, threshold=FUZZY_MATCH_THRESHOLD)
             if not matches:
                 return f"Error: No room found matching '{room_identifier}'."
             if len(matches) > 1 and matches[0][2] != 0:
@@ -2331,7 +2310,7 @@ def control_zone(zone_name: str, on: bool, ctx: Context) -> str:
             return "No zones found. Zones can be created using create_zone()."
 
         # Find matching zones
-        matches = find_similar_names(zone_name, zones, threshold=3)
+        matches = find_similar_names(zone_name, zones, threshold=FUZZY_MATCH_THRESHOLD)
 
         if not matches:
             return f"Error: No zone found matching '{zone_name}'.\nUse get_all_zones() to see available zones."
