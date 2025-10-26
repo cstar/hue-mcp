@@ -6,21 +6,22 @@ Philips Hue lights. It exposes resources for retrieving light information
 and tools for controlling lights.
 
 Requirements:
-- phue: Python library for Philips Hue API
+- qhue: Python library for Philips Hue API
 - mcp: Model Context Protocol Python SDK
 
 Setup:
-1. Install dependencies: pip install phue mcp
-2. Update the bridge_ip in the config section or use bridge discovery
+1. Install dependencies: uv sync (or pip install qhue mcp)
+2. Update the bridge_ip in the config section if auto-discovery doesn't work
 3. Run the server: python hue_server.py
 4. Press the link button on your Hue bridge when prompted during first run
 """
 
 from mcp.server.fastmcp import FastMCP, Context
-from phue import Bridge
+from qhue import Bridge, QhueException, create_new_username
 import json
 import os
 import logging
+import requests
 from typing import Dict, List, Optional, Tuple
 from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
@@ -30,16 +31,36 @@ from dataclasses import dataclass
 # You can customize these values or load from a config file
 
 # Bridge IP - can be set to None for auto-discovery
-BRIDGE_IP = None  # Example: "192.168.1.100"
+BRIDGE_IP = "192.168.1.10"  # Your bridge IP (set to None for auto-discovery)
 
 # Path to store bridge connection info
 CONFIG_DIR = os.path.expanduser("~/.hue-mcp")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 
 # Configure logging
-logging.basicConfig(level=logging.INFO, 
+logging.basicConfig(level=logging.INFO,
                    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("hue-mcp")
+
+# --- Helper Functions ---
+
+def discover_bridge() -> Optional[str]:
+    """
+    Attempt to discover Hue bridge on the local network.
+    Returns the bridge IP address or None if not found.
+    """
+    try:
+        logger.info("Attempting bridge discovery via Hue discovery API...")
+        response = requests.get("https://discovery.meethue.com/", timeout=5)
+        if response.status_code == 200:
+            bridges = response.json()
+            if bridges and len(bridges) > 0:
+                bridge_ip = bridges[0].get('internalipaddress')
+                logger.info(f"Discovered bridge at {bridge_ip}")
+                return bridge_ip
+    except Exception as e:
+        logger.warning(f"Bridge discovery failed: {e}")
+    return None
 
 # --- Server Context Setup ---
 
@@ -53,7 +74,7 @@ class HueContext:
 async def hue_lifespan(server: FastMCP) -> AsyncIterator[HueContext]:
     """
     Manage connection to Hue Bridge.
-    
+
     This function handles:
     1. Discovery or connection to the bridge
     2. Storing/loading connection info
@@ -61,11 +82,11 @@ async def hue_lifespan(server: FastMCP) -> AsyncIterator[HueContext]:
     """
     # Ensure config directory exists
     os.makedirs(CONFIG_DIR, exist_ok=True)
-    
+
     # Load saved config if it exists
     bridge_ip = BRIDGE_IP
     bridge_username = None
-    
+
     if os.path.exists(CONFIG_FILE):
         try:
             with open(CONFIG_FILE, 'r') as f:
@@ -75,36 +96,57 @@ async def hue_lifespan(server: FastMCP) -> AsyncIterator[HueContext]:
                 logger.info(f"Loaded configuration from {CONFIG_FILE}")
         except Exception as e:
             logger.error(f"Error loading config: {e}")
-    
+
     # Initialize Bridge
     try:
         # If no IP specified, attempt discovery
         if not bridge_ip:
             logger.info("No bridge IP specified, attempting discovery...")
-            bridge = Bridge()  # This will attempt discovery
-            bridge_ip = bridge.ip
+            bridge_ip = discover_bridge()
+            if not bridge_ip:
+                raise Exception("Bridge discovery failed. Please set BRIDGE_IP manually.")
             logger.info(f"Discovered bridge at {bridge_ip}")
         else:
-            logger.info(f"Connecting to bridge at {bridge_ip}")
-            bridge = Bridge(bridge_ip, username=bridge_username)
-        
-        # Connect to the bridge (this may prompt user to press the link button)
-        bridge.connect()
-        
+            logger.info(f"Using bridge at {bridge_ip}")
+
+        # If no username, need to create one (requires link button press)
+        if not bridge_username:
+            logger.error("No username found in config!")
+            logger.error("=" * 60)
+            logger.error("SETUP REQUIRED:")
+            logger.error("1. Run: python test_connection.py")
+            logger.error("2. Press the link button on your Hue bridge when prompted")
+            logger.error("3. This will create ~/.hue-mcp/config.json")
+            logger.error("4. Then retry running the MCP server")
+            logger.error("=" * 60)
+            raise Exception(
+                "Bridge not configured. Please run 'python test_connection.py' first "
+                "and press the link button on your Hue bridge to authenticate."
+            )
+
+        # Create bridge connection
+        logger.info(f"Connecting to bridge at {bridge_ip}")
+        bridge = Bridge(bridge_ip, bridge_username)
+
+        # Test the connection by fetching lights
+        try:
+            light_info = bridge.lights()
+            logger.info(f"Successfully connected! Found {len(light_info)} lights")
+        except QhueException as e:
+            logger.error(f"Failed to connect to bridge: {e}")
+            raise
+
         # Save the configuration
         with open(CONFIG_FILE, 'w') as f:
             json.dump({
-                'bridge_ip': bridge.ip,
-                'username': bridge.username
+                'bridge_ip': bridge_ip,
+                'username': bridge_username
             }, f)
             logger.info(f"Saved configuration to {CONFIG_FILE}")
-        
-        # Build a cache of light information for faster access
-        light_info = bridge.get_light()
-        
+
         # Initialize and yield the context
         yield HueContext(bridge=bridge, light_info=light_info)
-        
+
     except Exception as e:
         logger.error(f"Error connecting to Hue bridge: {e}")
         # Re-raise to inform the server of the failure
@@ -115,9 +157,9 @@ async def hue_lifespan(server: FastMCP) -> AsyncIterator[HueContext]:
 
 # Create MCP server
 mcp = FastMCP(
-    "Philips Hue Controller", 
+    "Philips Hue Controller",
     lifespan=hue_lifespan,
-    dependencies=["phue"]
+    dependencies=["qhue"]
 )
 
 # --- Utility Functions ---
@@ -168,8 +210,17 @@ def validate_light_id(light_id: int, light_info: Dict) -> bool:
 
 def validate_group_id(group_id: int, bridge: Bridge) -> bool:
     """Validate that a group ID exists."""
-    groups = bridge.get_group()
+    groups = bridge.groups()
     return str(group_id) in groups
+
+# qhue API notes:
+# - bridge.lights() - get all lights
+# - bridge.lights[id]() - get specific light
+# - bridge.lights[id](on=True, bri=254) - set light state
+# - bridge.groups() - get all groups
+# - bridge.groups[id]() - get specific group
+# - bridge.groups[id].action(on=True) - set group action
+# - bridge.scenes() - get all scenes
 
 def format_light_info(light_info: Dict) -> Dict:
     """Format light information for display."""
@@ -235,15 +286,15 @@ def get_light(light_id: int, ctx: Context) -> str:
 def get_all_groups(ctx: Context) -> str:
     """
     Get information about all light groups.
-    
+
     Returns:
         JSON string containing information about all groups
     """
     bridge, _ = get_bridge_ctx(ctx)
-    
+
     try:
-        groups = bridge.get_group()
-        
+        groups = bridge.groups()
+
         # Format the groups for better readability
         formatted_groups = {}
         for group_id, group in groups.items():
@@ -254,7 +305,7 @@ def get_all_groups(ctx: Context) -> str:
                 "on": group["state"]["all_on"],
                 "any_on": group["state"]["any_on"]
             }
-        
+
         return json.dumps(formatted_groups, indent=2)
     except Exception as e:
         logger.error(f"Error getting groups: {e}")
@@ -274,7 +325,7 @@ def get_group(group_id: int, ctx: Context) -> str:
     bridge, _ = get_bridge_ctx(ctx)
     
     try:
-        groups = bridge.get_group()
+        groups = bridge.groups()
         
         # Convert group_id to string for dict lookup
         group_id_str = str(group_id)
@@ -299,7 +350,7 @@ def get_all_scenes(ctx: Context) -> str:
     bridge, _ = get_bridge_ctx(ctx)
     
     try:
-        scenes = bridge.get_scene()
+        scenes = bridge.scenes()
         
         # Format the scenes for better readability
         formatted_scenes = {}
@@ -337,7 +388,7 @@ def turn_on_light(light_id: int, ctx: Context) -> str:
         if not validate_light_id(light_id, light_info):
             return f"Error: Light with ID {light_id} not found."
         
-        bridge.set_light(light_id, 'on', True)
+        bridge.lights[str(light_id)](on=True)
         return f"Light {light_id} ({light_info[str(light_id)]['name']}) turned on."
     except Exception as e:
         logger.error(f"Error turning on light {light_id}: {e}")
@@ -361,82 +412,92 @@ def turn_off_light(light_id: int, ctx: Context) -> str:
         if not validate_light_id(light_id, light_info):
             return f"Error: Light with ID {light_id} not found."
         
-        bridge.set_light(light_id, 'on', False)
+        bridge.lights[str(light_id)](on=False)
         return f"Light {light_id} ({light_info[str(light_id)]['name']}) turned off."
     except Exception as e:
         logger.error(f"Error turning off light {light_id}: {e}")
         return f"Error: {str(e)}"
 
 @mcp.tool()
-def set_brightness(light_id: int, brightness: int, ctx: Context) -> str:
+def set_brightness(light_id: int, brightness: int, ctx: Context, transition_time: int = 4) -> str:
     """
-    Set the brightness of a light.
-    
+    Set the brightness of a light with optional smooth transition.
+
     Args:
         light_id: The ID of the light
         brightness: Brightness level (0-254)
-        
+        transition_time: Transition duration in deciseconds (1 = 0.1s, 10 = 1s). Default: 4 (0.4s)
+
     Returns:
         Confirmation message
     """
     if not 0 <= brightness <= 254:
         return "Error: Brightness must be between 0 and 254."
-    
+
+    if transition_time < 0:
+        return "Error: Transition time must be non-negative."
+
     bridge, light_info = get_bridge_ctx(ctx)
-    
+
     try:
         # Validate light ID
         if not validate_light_id(light_id, light_info):
             return f"Error: Light with ID {light_id} not found."
-        
+
         # Turn on the light if it's off
         if not light_info[str(light_id)]['state']['on']:
-            bridge.set_light(light_id, 'on', True)
-        
-        bridge.set_light(light_id, 'bri', brightness)
-        
+            bridge.lights[str(light_id)](on=True)
+
+        bridge.lights[str(light_id)](bri=brightness, transitiontime=transition_time)
+
         # Calculate brightness percentage for user feedback
         percentage = round((brightness / 254) * 100)
-        return f"Light {light_id} ({light_info[str(light_id)]['name']}) brightness set to {brightness} ({percentage}%)."
+        transition_seconds = transition_time / 10
+        return f"Light {light_id} ({light_info[str(light_id)]['name']}) brightness set to {brightness} ({percentage}%) with {transition_seconds}s transition."
     except Exception as e:
         logger.error(f"Error setting brightness for light {light_id}: {e}")
         return f"Error: {str(e)}"
 
 @mcp.tool()
-def set_color_rgb(light_id: int, red: int, green: int, blue: int, ctx: Context) -> str:
+def set_color_rgb(light_id: int, red: int, green: int, blue: int, ctx: Context, transition_time: int = 4) -> str:
     """
-    Set light color using RGB values.
-    
+    Set light color using RGB values with optional smooth transition.
+
     Args:
         light_id: The ID of the light
         red: Red value (0-255)
         green: Green value (0-255)
         blue: Blue value (0-255)
-        
+        transition_time: Transition duration in deciseconds (1 = 0.1s, 10 = 1s). Default: 4 (0.4s)
+
     Returns:
         Confirmation message
     """
     if not all(0 <= c <= 255 for c in (red, green, blue)):
         return "Error: RGB values must be between 0 and 255."
-    
+
+    if transition_time < 0:
+        return "Error: Transition time must be non-negative."
+
     bridge, light_info = get_bridge_ctx(ctx)
-    
+
     try:
         # Validate light ID
         if not validate_light_id(light_id, light_info):
             return f"Error: Light with ID {light_id} not found."
-        
+
         # Check if light supports color
         if 'xy' not in light_info[str(light_id)]['state']:
             return f"Error: Light {light_id} ({light_info[str(light_id)]['name']}) does not support color."
-        
+
         # Turn on the light if it's off
         if not light_info[str(light_id)]['state']['on']:
-            bridge.set_light(light_id, 'on', True)
-        
+            bridge.lights[str(light_id)](on=True)
+
         xy = rgb_to_xy(red, green, blue)
-        bridge.set_light(light_id, 'xy', xy)
-        return f"Light {light_id} ({light_info[str(light_id)]['name']}) color set to RGB({red}, {green}, {blue})."
+        bridge.lights[str(light_id)](xy=xy, transitiontime=transition_time)
+        transition_seconds = transition_time / 10
+        return f"Light {light_id} ({light_info[str(light_id)]['name']}) color set to RGB({red}, {green}, {blue}) with {transition_seconds}s transition."
     except Exception as e:
         logger.error(f"Error setting RGB color for light {light_id}: {e}")
         return f"Error: {str(e)}"
@@ -460,10 +521,10 @@ def turn_on_group(group_id: int, ctx: Context) -> str:
             return f"Error: Group with ID {group_id} not found."
         
         # Get group info for name
-        group_info = bridge.get_group(group_id)
+        group_info = bridge.groups[str(group_id)]()
         group_name = group_info.get('name', f"Group {group_id}")
         
-        bridge.set_group(group_id, 'on', True)
+        bridge.groups[str(group_id)].action(on=True)
         return f"Group {group_id} ({group_name}) turned on."
     except Exception as e:
         logger.error(f"Error turning on group {group_id}: {e}")
@@ -488,89 +549,99 @@ def turn_off_group(group_id: int, ctx: Context) -> str:
             return f"Error: Group with ID {group_id} not found."
         
         # Get group info for name
-        group_info = bridge.get_group(group_id)
+        group_info = bridge.groups[str(group_id)]()
         group_name = group_info.get('name', f"Group {group_id}")
         
-        bridge.set_group(group_id, 'on', False)
+        bridge.groups[str(group_id)].action(on=False)
         return f"Group {group_id} ({group_name}) turned off."
     except Exception as e:
         logger.error(f"Error turning off group {group_id}: {e}")
         return f"Error: {str(e)}"
 
 @mcp.tool()
-def set_group_brightness(group_id: int, brightness: int, ctx: Context) -> str:
+def set_group_brightness(group_id: int, brightness: int, ctx: Context, transition_time: int = 4) -> str:
     """
-    Set the brightness of all lights in a group.
-    
+    Set the brightness of all lights in a group with optional smooth transition.
+
     Args:
         group_id: The ID of the group
         brightness: Brightness level (0-254)
-        
+        transition_time: Transition duration in deciseconds (1 = 0.1s, 10 = 1s). Default: 4 (0.4s)
+
     Returns:
         Confirmation message
     """
     if not 0 <= brightness <= 254:
         return "Error: Brightness must be between 0 and 254."
-    
+
+    if transition_time < 0:
+        return "Error: Transition time must be non-negative."
+
     bridge, _ = get_bridge_ctx(ctx)
-    
+
     try:
         # Validate group ID
         if not validate_group_id(group_id, bridge):
             return f"Error: Group with ID {group_id} not found."
-        
+
         # Get group info for name
-        group_info = bridge.get_group(group_id)
+        group_info = bridge.groups[str(group_id)]()
         group_name = group_info.get('name', f"Group {group_id}")
-        
+
         # Turn on the group if it's off
         if not group_info['state']['any_on']:
-            bridge.set_group(group_id, 'on', True)
-        
-        bridge.set_group(group_id, 'bri', brightness)
-        
+            bridge.groups[str(group_id)].action(on=True)
+
+        bridge.groups[str(group_id)].action(bri=brightness, transitiontime=transition_time)
+
         # Calculate brightness percentage for user feedback
         percentage = round((brightness / 254) * 100)
-        return f"Group {group_id} ({group_name}) brightness set to {brightness} ({percentage}%)."
+        transition_seconds = transition_time / 10
+        return f"Group {group_id} ({group_name}) brightness set to {brightness} ({percentage}%) with {transition_seconds}s transition."
     except Exception as e:
         logger.error(f"Error setting brightness for group {group_id}: {e}")
         return f"Error: {str(e)}"
 
 @mcp.tool()
-def set_group_color_rgb(group_id: int, red: int, green: int, blue: int, ctx: Context) -> str:
+def set_group_color_rgb(group_id: int, red: int, green: int, blue: int, ctx: Context, transition_time: int = 4) -> str:
     """
-    Set color for all lights in a group using RGB values.
-    
+    Set color for all lights in a group using RGB values with optional smooth transition.
+
     Args:
         group_id: The ID of the group
         red: Red value (0-255)
         green: Green value (0-255)
         blue: Blue value (0-255)
-        
+        transition_time: Transition duration in deciseconds (1 = 0.1s, 10 = 1s). Default: 4 (0.4s)
+
     Returns:
         Confirmation message
     """
     if not all(0 <= c <= 255 for c in (red, green, blue)):
         return "Error: RGB values must be between 0 and 255."
-    
+
+    if transition_time < 0:
+        return "Error: Transition time must be non-negative."
+
     bridge, _ = get_bridge_ctx(ctx)
-    
+
     try:
         # Validate group ID
         if not validate_group_id(group_id, bridge):
             return f"Error: Group with ID {group_id} not found."
-        
+
         # Get group info for name
-        group_info = bridge.get_group(group_id)
+        group_info = bridge.groups[str(group_id)]()
         group_name = group_info.get('name', f"Group {group_id}")
-        
+
         # Turn on the group if it's off
         if not group_info['state']['any_on']:
-            bridge.set_group(group_id, 'on', True)
-        
+            bridge.groups[str(group_id)].action(on=True)
+
         xy = rgb_to_xy(red, green, blue)
-        bridge.set_group(group_id, 'xy', xy)
-        return f"Group {group_id} ({group_name}) color set to RGB({red}, {green}, {blue})."
+        bridge.groups[str(group_id)].action(xy=xy, transitiontime=transition_time)
+        transition_seconds = transition_time / 10
+        return f"Group {group_id} ({group_name}) color set to RGB({red}, {green}, {blue}) with {transition_seconds}s transition."
     except Exception as e:
         logger.error(f"Error setting color for group {group_id}: {e}")
         return f"Error: {str(e)}"
@@ -595,15 +666,15 @@ def set_scene(group_id: int, scene_id: str, ctx: Context) -> str:
             return f"Error: Group with ID {group_id} not found."
         
         # Verify the scene exists
-        scenes = bridge.get_scene()
+        scenes = bridge.scenes()
         if scene_id not in scenes:
             return f"Error: Scene with ID {scene_id} not found."
         
         # Get names for better feedback
-        group_name = bridge.get_group(group_id).get('name', f"Group {group_id}")
+        group_name = bridge.groups[str(group_id)]().get('name', f"Group {group_id}")
         scene_name = scenes[scene_id].get('name', f"Scene {scene_id}")
         
-        bridge.set_group(group_id, 'scene', scene_id)
+        bridge.groups[str(group_id)].action(scene=scene_id)
         return f"Scene '{scene_name}' applied to group '{group_name}'."
     except Exception as e:
         logger.error(f"Error applying scene {scene_id} to group {group_id}: {e}")
@@ -672,19 +743,27 @@ def create_group(
         
         # Convert light IDs to strings (Hue API requirement)
         light_id_strings = [str(lid) for lid in light_ids]
-        
-        # Create the group
-        result = bridge.create_group(name, light_id_strings)
-        
+
+        # Create the group (qhue POST operation)
+        # In qhue, we use the http_method parameter or call the resource with data
+        import requests
+        result = requests.post(
+            f"http://{bridge.ip}/api/{bridge.username}/groups",
+            json={"name": name, "lights": light_id_strings, "type": "LightGroup"}
+        )
+        result_data = result.json()
+
         # Extract the group ID from the result
-        if 'success' in result[0]:
-            # Extract the ID from the success response
-            # Format is usually: {"success":{"id":"/groups/1"}}
-            success_path = list(result[0]['success'].values())[0]
-            group_id = success_path.split('/')[-1]
-            return f"Group '{name}' created with ID {group_id}, containing {len(light_ids)} lights."
-        else:
-            return f"Error creating group: {result}"
+        if result_data and isinstance(result_data, list) and len(result_data) > 0:
+            if 'success' in result_data[0]:
+                # Extract the ID from the success response
+                # Format is usually: {"success":{"id":"/groups/1"}}
+                success_dict = result_data[0]['success']
+                if 'id' in success_dict:
+                    group_id = success_dict['id'].split('/')[-1]
+                    return f"Group '{name}' created with ID {group_id}, containing {len(light_ids)} lights."
+
+        return f"Error creating group: {result_data}"
     except Exception as e:
         logger.error(f"Error creating group '{name}': {e}")
         return f"Error: {str(e)}"
@@ -719,30 +798,30 @@ def quick_scene(
             return f"Error: Group with ID {group_id} not found."
         
         # Get group info for name
-        group_info = bridge.get_group(group_id)
+        group_info = bridge.groups[str(group_id)]()
         group_name = group_info.get('name', f"Group {group_id}")
         
         # Turn on the group
-        bridge.set_group(group_id, 'on', True)
+        bridge.groups[str(group_id)].action(on=True)
         
         # Apply settings
         if brightness is not None:
             if not 0 <= brightness <= 254:
                 return "Error: Brightness must be between 0 and 254."
-            bridge.set_group(group_id, 'bri', brightness)
+            bridge.groups[str(group_id)].action(bri=brightness)
         
         if rgb is not None:
             if not all(0 <= c <= 255 for c in rgb) or len(rgb) != 3:
                 return "Error: RGB values must be three values between 0 and 255."
             xy = rgb_to_xy(rgb[0], rgb[1], rgb[2])
-            bridge.set_group(group_id, 'xy', xy)
+            bridge.groups[str(group_id)].action(xy=xy)
         
         if temperature is not None:
             if not 2000 <= temperature <= 6500:
                 return "Error: Temperature must be between 2000K and 6500K."
             # Convert temperature in K to mired
             mired = int(1000000 / temperature)
-            bridge.set_group(group_id, 'ct', mired)
+            bridge.groups[str(group_id)].action(ct=mired)
         
         # Return a summary of what was applied
         changes = []
@@ -773,10 +852,10 @@ def refresh_lights(ctx: Context) -> str:
     
     try:
         # Update the bridge's internal state
-        bridge.get_api()
+        bridge.config()
         
         # Update our cache
-        light_info = bridge.get_light()
+        light_info = bridge.lights()
         ctx.request_context.lifespan_context.light_info = light_info
         
         return f"Refreshed information for {len(light_info)} lights."
@@ -842,11 +921,11 @@ def set_color_preset(
         
         # Turn on the light if it's off
         if not light_info[str(light_id)]['state']['on']:
-            bridge.set_light(light_id, 'on', True)
+            bridge.lights[str(light_id)](on=True)
         
         # Apply preset settings
         for key, value in presets[preset].items():
-            bridge.set_light(light_id, key, value)
+            bridge.lights[str(light_id)](**{key: value})
         
         return f"Applied '{preset}' preset to light {light_id} ({light_info[str(light_id)]['name']})."
     except Exception as e:
@@ -902,16 +981,16 @@ def set_group_color_preset(
             return f"Error: Group with ID {group_id} not found."
         
         # Get group info for name
-        group_info = bridge.get_group(group_id)
+        group_info = bridge.groups[str(group_id)]()
         group_name = group_info.get('name', f"Group {group_id}")
         
         # Turn on the group if it's off
         if not group_info['state']['any_on']:
-            bridge.set_group(group_id, 'on', True)
+            bridge.groups[str(group_id)].action(on=True)
         
         # Apply preset settings
         for key, value in presets[preset].items():
-            bridge.set_group(group_id, key, value)
+            bridge.groups[str(group_id)].action(**{key: value})
         
         return f"Applied '{preset}' preset to group '{group_name}'."
     except Exception as e:
@@ -937,7 +1016,7 @@ def alert_light(light_id: int, ctx: Context) -> str:
             return f"Error: Light with ID {light_id} not found."
         
         # Use the alert feature of Hue lights
-        bridge.set_light(light_id, 'alert', 'select')
+        bridge.lights[str(light_id)](alert='select')
         
         return f"Light {light_id} ({light_info[str(light_id)]['name']}) alerted with a brief flash."
     except Exception as e:
@@ -974,14 +1053,150 @@ def set_light_effect(light_id: int, effect: str, ctx: Context) -> str:
         
         # Turn on the light if it's off
         if not light_info[str(light_id)]['state']['on']:
-            bridge.set_light(light_id, 'on', True)
+            bridge.lights[str(light_id)](on=True)
         
-        bridge.set_light(light_id, 'effect', effect)
+        bridge.lights[str(light_id)](effect=effect)
         
         effect_name = "color loop" if effect == "colorloop" else "no effect"
         return f"Set {effect_name} on light {light_id} ({light_info[str(light_id)]['name']})."
     except Exception as e:
         logger.error(f"Error setting effect {effect} on light {light_id}: {e}")
+        return f"Error: {str(e)}"
+
+# --- Capability Discovery Tools ---
+
+@mcp.tool()
+def get_light_capabilities(light_id: int, ctx: Context) -> str:
+    """
+    Get detailed information about what a specific light supports.
+
+    Args:
+        light_id: The ID of the light
+
+    Returns:
+        JSON string containing the light's capabilities (color, temperature, effects, etc.)
+    """
+    bridge, light_info = get_bridge_ctx(ctx)
+
+    try:
+        # Validate light ID
+        if not validate_light_id(light_id, light_info):
+            return f"Error: Light with ID {light_id} not found."
+
+        light = light_info[str(light_id)]
+        state = light['state']
+
+        capabilities = {
+            "light_id": light_id,
+            "name": light['name'],
+            "type": light['type'],
+            "model": light.get('modelid', 'Unknown'),
+            "manufacturer": light.get('manufacturername', 'Unknown'),
+            "software_version": light.get('swversion', 'Unknown'),
+            "capabilities": {
+                "on_off": True,  # All lights support on/off
+                "brightness": 'bri' in state,
+                "color_xy": 'xy' in state,
+                "color_temperature": 'ct' in state,
+                "hue_saturation": 'hue' in state and 'sat' in state,
+                "effects": 'effect' in state,
+                "alerts": 'alert' in state,
+                "color_mode": state.get('colormode', 'N/A')
+            },
+            "state": {
+                "on": state['on'],
+                "reachable": state.get('reachable', True),
+                "brightness": state.get('bri'),
+                "color_mode": state.get('colormode')
+            }
+        }
+
+        # Add current color info if available
+        if 'xy' in state:
+            capabilities['state']['xy'] = state['xy']
+        if 'ct' in state:
+            capabilities['state']['color_temperature_mired'] = state['ct']
+            # Convert mired to Kelvin for easier understanding
+            capabilities['state']['color_temperature_kelvin'] = int(1000000 / state['ct'])
+        if 'hue' in state:
+            capabilities['state']['hue'] = state['hue']
+        if 'sat' in state:
+            capabilities['state']['saturation'] = state['sat']
+
+        return json.dumps(capabilities, indent=2)
+
+    except Exception as e:
+        logger.error(f"Error getting capabilities for light {light_id}: {e}")
+        return f"Error: {str(e)}"
+
+@mcp.tool()
+def get_all_capabilities(ctx: Context) -> str:
+    """
+    Get a summary of all lights and their capabilities.
+
+    Returns:
+        JSON string containing a summary of what each light can do
+    """
+    bridge, light_info = get_bridge_ctx(ctx)
+
+    try:
+        summary = {
+            "total_lights": len(light_info),
+            "lights": {}
+        }
+
+        # Count capability types
+        capability_counts = {
+            "color_xy": 0,
+            "color_temperature": 0,
+            "hue_saturation": 0,
+            "effects": 0,
+            "dimmable_only": 0
+        }
+
+        for light_id, light in light_info.items():
+            state = light['state']
+
+            # Determine light type
+            light_type = "unknown"
+            if 'xy' in state or ('hue' in state and 'sat' in state):
+                light_type = "color"
+                capability_counts["color_xy"] += 1
+            elif 'ct' in state:
+                light_type = "temperature"
+                capability_counts["color_temperature"] += 1
+            elif 'bri' in state:
+                light_type = "dimmable"
+                capability_counts["dimmable_only"] += 1
+
+            if 'effect' in state:
+                capability_counts["effects"] += 1
+
+            summary["lights"][light_id] = {
+                "name": light['name'],
+                "type": light['type'],
+                "model": light.get('modelid', 'Unknown'),
+                "light_type": light_type,
+                "capabilities": {
+                    "brightness": 'bri' in state,
+                    "color": 'xy' in state or ('hue' in state and 'sat' in state),
+                    "temperature": 'ct' in state,
+                    "effects": 'effect' in state
+                },
+                "reachable": state.get('reachable', True)
+            }
+
+        summary["capability_summary"] = {
+            "color_lights": capability_counts["color_xy"],
+            "temperature_lights": capability_counts["color_temperature"],
+            "dimmable_only": capability_counts["dimmable_only"],
+            "supports_effects": capability_counts["effects"]
+        }
+
+        return json.dumps(summary, indent=2)
+
+    except Exception as e:
+        logger.error(f"Error getting all capabilities: {e}")
         return f"Error: {str(e)}"
 
 # --- Prompts ---
@@ -1050,31 +1265,8 @@ for typical home use.
 # --- Main Function ---
 
 if __name__ == "__main__":
-    import uvicorn
-    import argparse
-    
-    parser = argparse.ArgumentParser(description="Philips Hue MCP Server")
-    parser.add_argument("--port", type=int, default=8080, help="Port to run the server on")
-    parser.add_argument("--host", type=str, default="127.0.0.1", help="Host to bind the server to")
-    parser.add_argument("--log-level", type=str, default="info", 
-                        choices=["debug", "info", "warning", "error", "critical"],
-                        help="Logging level")
-    args = parser.parse_args()
-    
-    # Set up logging level
-    log_level = getattr(logging, args.log_level.upper())
-    logging.getLogger("hue-mcp").setLevel(log_level)
-    
-    print(f"Starting Philips Hue MCP Server on {args.host}:{args.port}")
-    print("Press Ctrl+C to stop the server")
-    
-    # Run the server using mcp.run() or manually with Uvicorn
-    # mcp.run(host=args.host, port=args.port)  # Use this for direct execution
-    
-    # Or use Uvicorn for more control
-    uvicorn.run(
-        mcp.sse_app(),
-        host=args.host,
-        port=args.port,
-        log_level=args.log_level
-    )
+    # When run directly (not via MCP), use stdio transport
+    # This allows the server to work with both:
+    # - MCP clients (Claude Desktop, mcp dev, etc.) via stdio
+    # - Direct HTTP access via SSE (use --transport sse flag)
+    mcp.run()
