@@ -213,6 +213,132 @@ def validate_group_id(group_id: int, bridge: Bridge) -> bool:
     groups = bridge.groups()
     return str(group_id) in groups
 
+def find_similar_names(search_name: str, items: Dict, threshold: int = 3) -> List[tuple]:
+    """
+    Find items with names similar to the search term using Levenshtein distance.
+
+    Args:
+        search_name: The name to search for
+        items: Dictionary of items with 'name' field
+        threshold: Maximum edit distance to consider a match
+
+    Returns:
+        List of (id, name, distance) tuples sorted by distance
+    """
+    def levenshtein_distance(s1: str, s2: str) -> int:
+        """Calculate the Levenshtein distance between two strings."""
+        if len(s1) < len(s2):
+            return levenshtein_distance(s2, s1)
+        if len(s2) == 0:
+            return len(s1)
+
+        previous_row = range(len(s2) + 1)
+        for i, c1 in enumerate(s1):
+            current_row = [i + 1]
+            for j, c2 in enumerate(s2):
+                insertions = previous_row[j + 1] + 1
+                deletions = current_row[j] + 1
+                substitutions = previous_row[j] + (c1 != c2)
+                current_row.append(min(insertions, deletions, substitutions))
+            previous_row = current_row
+
+        return previous_row[-1]
+
+    search_lower = search_name.lower()
+    matches = []
+
+    for item_id, item in items.items():
+        item_name = item.get('name', '')
+        item_name_lower = item_name.lower()
+
+        # Exact match
+        if search_lower == item_name_lower:
+            matches.append((item_id, item_name, 0))
+        # Substring match
+        elif search_lower in item_name_lower:
+            matches.append((item_id, item_name, 1))
+        else:
+            # Calculate edit distance
+            distance = levenshtein_distance(search_lower, item_name_lower)
+            if distance <= threshold:
+                matches.append((item_id, item_name, distance))
+
+    # Sort by distance, then by name
+    matches.sort(key=lambda x: (x[2], x[1]))
+    return matches
+
+def validate_light_id_with_suggestions(light_id: int, light_info: Dict) -> str:
+    """
+    Validate light ID and provide helpful error message with suggestions.
+
+    Args:
+        light_id: The light ID to validate
+
+    Returns:
+        Empty string if valid, error message with suggestions if invalid
+    """
+    if validate_light_id(light_id, light_info):
+        return ""
+
+    # Provide helpful suggestions
+    available_lights = [f"{lid} ({light['name']})" for lid, light in light_info.items()]
+    error_msg = f"Error: Light with ID {light_id} not found.\n"
+    error_msg += f"Available light IDs: {', '.join(available_lights[:5])}"
+    if len(available_lights) > 5:
+        error_msg += f"... and {len(available_lights) - 5} more"
+
+    return error_msg
+
+def validate_group_id_with_suggestions(group_id: int, bridge: Bridge) -> str:
+    """
+    Validate group ID and provide helpful error message with suggestions.
+
+    Args:
+        group_id: The group ID to validate
+
+    Returns:
+        Empty string if valid, error message with suggestions if invalid
+    """
+    groups = bridge.groups()
+    if validate_group_id(group_id, bridge):
+        return ""
+
+    # Provide helpful suggestions
+    available_groups = [f"{gid} ({group['name']})" for gid, group in groups.items()]
+    error_msg = f"Error: Group with ID {group_id} not found.\n"
+    error_msg += f"Available group IDs: {', '.join(available_groups[:5])}"
+    if len(available_groups) > 5:
+        error_msg += f"... and {len(available_groups) - 5} more"
+
+    return error_msg
+
+def find_light_by_name_fuzzy(name: str, light_info: Dict) -> Optional[tuple]:
+    """
+    Find a light by name using fuzzy matching.
+
+    Args:
+        name: Partial or misspelled light name
+
+    Returns:
+        Tuple of (light_id, light_name) if found, None otherwise
+    """
+    matches = find_similar_names(name, light_info, threshold=3)
+    return (matches[0][0], matches[0][1]) if matches else None
+
+def find_group_by_name_fuzzy(name: str, bridge: Bridge) -> Optional[tuple]:
+    """
+    Find a group by name using fuzzy matching.
+
+    Args:
+        name: Partial or misspelled group name
+
+    Returns:
+        Tuple of (group_id, group_name) if found, None otherwise
+    """
+    groups = bridge.groups()
+    matches = find_similar_names(name, groups, threshold=3)
+    return (matches[0][0], matches[0][1]) if matches else None
+
 # qhue API notes:
 # - bridge.lights() - get all lights
 # - bridge.lights[id]() - get specific light
@@ -416,6 +542,80 @@ def turn_off_light(light_id: int, ctx: Context) -> str:
         return f"Light {light_id} ({light_info[str(light_id)]['name']}) turned off."
     except Exception as e:
         logger.error(f"Error turning off light {light_id}: {e}")
+        return f"Error: {str(e)}"
+
+@mcp.tool()
+def control_light_by_name(name: str, on: bool, ctx: Context) -> str:
+    """
+    Turn a light on or off by name using fuzzy matching.
+
+    Args:
+        name: Full or partial light name (fuzzy matching supported)
+        on: True to turn on, False to turn off
+
+    Returns:
+        Confirmation message or "Did you mean?" suggestions
+    """
+    bridge, light_info = get_bridge_ctx(ctx)
+
+    try:
+        # Find matching lights
+        matches = find_similar_names(name, light_info, threshold=3)
+
+        if not matches:
+            return f"Error: No lights found matching '{name}'.\nUse get_all_lights() to see available lights."
+
+        # If exact or close match, use it
+        if len(matches) == 1 or matches[0][2] == 0:
+            light_id, light_name, distance = matches[0]
+            bridge.lights[str(light_id)](on=on)
+            action = "on" if on else "off"
+            return f"Light '{light_name}' (ID: {light_id}) turned {action}."
+
+        # Multiple matches - ask user to clarify
+        suggestions = [f"'{m[1]}' (ID: {m[0]})" for m in matches[:3]]
+        return f"Multiple lights match '{name}'. Did you mean: {', '.join(suggestions)}?\nPlease use a more specific name or use the light ID."
+
+    except Exception as e:
+        logger.error(f"Error controlling light by name '{name}': {e}")
+        return f"Error: {str(e)}"
+
+@mcp.tool()
+def control_group_by_name(name: str, on: bool, ctx: Context) -> str:
+    """
+    Turn a group on or off by name using fuzzy matching.
+
+    Args:
+        name: Full or partial group name (fuzzy matching supported)
+        on: True to turn on, False to turn off
+
+    Returns:
+        Confirmation message or "Did you mean?" suggestions
+    """
+    bridge, _ = get_bridge_ctx(ctx)
+
+    try:
+        groups = bridge.groups()
+
+        # Find matching groups
+        matches = find_similar_names(name, groups, threshold=3)
+
+        if not matches:
+            return f"Error: No groups found matching '{name}'.\nUse get_all_groups() to see available groups."
+
+        # If exact or close match, use it
+        if len(matches) == 1 or matches[0][2] == 0:
+            group_id, group_name, distance = matches[0]
+            bridge.groups[str(group_id)].action(on=on)
+            action = "on" if on else "off"
+            return f"Group '{group_name}' (ID: {group_id}) turned {action}."
+
+        # Multiple matches - ask user to clarify
+        suggestions = [f"'{m[1]}' (ID: {m[0]})" for m in matches[:3]]
+        return f"Multiple groups match '{name}'. Did you mean: {', '.join(suggestions)}?\nPlease use a more specific name or use the group ID."
+
+    except Exception as e:
+        logger.error(f"Error controlling group by name '{name}': {e}")
         return f"Error: {str(e)}"
 
 @mcp.tool()
