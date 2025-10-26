@@ -513,8 +513,9 @@ def turn_on_light(light_id: int, ctx: Context) -> str:
         # Validate light ID
         if not validate_light_id(light_id, light_info):
             return f"Error: Light with ID {light_id} not found."
-        
-        bridge.lights[str(light_id)](on=True)
+
+        # Use state endpoint for qhue
+        bridge.lights[str(light_id)].state(on=True)
         return f"Light {light_id} ({light_info[str(light_id)]['name']}) turned on."
     except Exception as e:
         logger.error(f"Error turning on light {light_id}: {e}")
@@ -537,8 +538,9 @@ def turn_off_light(light_id: int, ctx: Context) -> str:
         # Validate light ID
         if not validate_light_id(light_id, light_info):
             return f"Error: Light with ID {light_id} not found."
-        
-        bridge.lights[str(light_id)](on=False)
+
+        # Use state endpoint for qhue
+        bridge.lights[str(light_id)].state(on=False)
         return f"Light {light_id} ({light_info[str(light_id)]['name']}) turned off."
     except Exception as e:
         logger.error(f"Error turning off light {light_id}: {e}")
@@ -568,7 +570,7 @@ def control_light_by_name(name: str, on: bool, ctx: Context) -> str:
         # If exact or close match, use it
         if len(matches) == 1 or matches[0][2] == 0:
             light_id, light_name, distance = matches[0]
-            bridge.lights[str(light_id)](on=on)
+            bridge.lights[str(light_id)].state(on=on)
             action = "on" if on else "off"
             return f"Light '{light_name}' (ID: {light_id}) turned {action}."
 
@@ -646,9 +648,9 @@ def set_brightness(light_id: int, brightness: int, ctx: Context, transition_time
 
         # Turn on the light if it's off
         if not light_info[str(light_id)]['state']['on']:
-            bridge.lights[str(light_id)](on=True)
+            bridge.lights[str(light_id)].state(on=True)
 
-        bridge.lights[str(light_id)](bri=brightness, transitiontime=transition_time)
+        bridge.lights[str(light_id)].state(bri=brightness, transitiontime=transition_time)
 
         # Calculate brightness percentage for user feedback
         percentage = round((brightness / 254) * 100)
@@ -692,10 +694,10 @@ def set_color_rgb(light_id: int, red: int, green: int, blue: int, ctx: Context, 
 
         # Turn on the light if it's off
         if not light_info[str(light_id)]['state']['on']:
-            bridge.lights[str(light_id)](on=True)
+            bridge.lights[str(light_id)].state(on=True)
 
         xy = rgb_to_xy(red, green, blue)
-        bridge.lights[str(light_id)](xy=xy, transitiontime=transition_time)
+        bridge.lights[str(light_id)].state(xy=xy, transitiontime=transition_time)
         transition_seconds = transition_time / 10
         return f"Light {light_id} ({light_info[str(light_id)]['name']}) color set to RGB({red}, {green}, {blue}) with {transition_seconds}s transition."
     except Exception as e:
@@ -1121,11 +1123,11 @@ def set_color_preset(
         
         # Turn on the light if it's off
         if not light_info[str(light_id)]['state']['on']:
-            bridge.lights[str(light_id)](on=True)
-        
+            bridge.lights[str(light_id)].state(on=True)
+
         # Apply preset settings
         for key, value in presets[preset].items():
-            bridge.lights[str(light_id)](**{key: value})
+            bridge.lights[str(light_id)].state(**{key: value})
         
         return f"Applied '{preset}' preset to light {light_id} ({light_info[str(light_id)]['name']})."
     except Exception as e:
@@ -1216,7 +1218,7 @@ def alert_light(light_id: int, ctx: Context) -> str:
             return f"Error: Light with ID {light_id} not found."
         
         # Use the alert feature of Hue lights
-        bridge.lights[str(light_id)](alert='select')
+        bridge.lights[str(light_id)].state(alert='select')
         
         return f"Light {light_id} ({light_info[str(light_id)]['name']}) alerted with a brief flash."
     except Exception as e:
@@ -1253,9 +1255,9 @@ def set_light_effect(light_id: int, effect: str, ctx: Context) -> str:
         
         # Turn on the light if it's off
         if not light_info[str(light_id)]['state']['on']:
-            bridge.lights[str(light_id)](on=True)
-        
-        bridge.lights[str(light_id)](effect=effect)
+            bridge.lights[str(light_id)].state(on=True)
+
+        bridge.lights[str(light_id)].state(effect=effect)
         
         effect_name = "color loop" if effect == "colorloop" else "no effect"
         return f"Set {effect_name} on light {light_id} ({light_info[str(light_id)]['name']})."
