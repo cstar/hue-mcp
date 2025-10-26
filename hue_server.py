@@ -1611,6 +1611,406 @@ def get_connection_diagnostics(ctx: Context) -> str:
 
     return json.dumps(diagnostics, indent=2)
 
+# --- Room Management Tools ---
+
+@mcp.tool()
+def get_all_rooms(ctx: Context) -> str:
+    """
+    Get all rooms (groups with type='Room') created in the Hue app.
+
+    Returns:
+        JSON string containing information about all rooms
+    """
+    bridge, light_info = get_bridge_ctx(ctx)
+
+    try:
+        groups = bridge.groups()
+
+        # Filter for rooms only (type='Room')
+        rooms = {}
+        for group_id, group in groups.items():
+            if group.get('type') == 'Room':
+                rooms[group_id] = {
+                    "id": group_id,
+                    "name": group['name'],
+                    "room_class": group.get('class', 'Other'),
+                    "lights": group['lights'],
+                    "light_count": len(group['lights']),
+                    "state": {
+                        "all_on": group['state']['all_on'],
+                        "any_on": group['state']['any_on']
+                    }
+                }
+
+                # Add light names for convenience
+                rooms[group_id]["light_names"] = [
+                    light_info[lid]['name'] for lid in group['lights']
+                    if lid in light_info
+                ]
+
+        if not rooms:
+            return "No rooms found. Rooms can be created in the Hue app or using create_room()."
+
+        return json.dumps({"total_rooms": len(rooms), "rooms": rooms}, indent=2)
+
+    except Exception as e:
+        logger.error(f"Error getting rooms: {e}")
+        return f"Error: {str(e)}"
+
+@mcp.tool()
+def get_room(room_identifier: str, ctx: Context) -> str:
+    """
+    Get information about a specific room by ID or name.
+
+    Args:
+        room_identifier: Room ID (numeric string) or room name (fuzzy matching supported)
+
+    Returns:
+        JSON string containing detailed room information
+    """
+    bridge, light_info = get_bridge_ctx(ctx)
+
+    try:
+        groups = bridge.groups()
+
+        # Try as ID first
+        if room_identifier in groups and groups[room_identifier].get('type') == 'Room':
+            group = groups[room_identifier]
+            room_info = {
+                "id": room_identifier,
+                "name": group['name'],
+                "room_class": group.get('class', 'Other'),
+                "lights": group['lights'],
+                "light_count": len(group['lights']),
+                "state": group['state']
+            }
+
+            # Add detailed light info
+            room_info["light_details"] = [
+                {
+                    "id": lid,
+                    "name": light_info[lid]['name'],
+                    "on": light_info[lid]['state']['on'],
+                    "reachable": light_info[lid]['state'].get('reachable', True)
+                }
+                for lid in group['lights'] if lid in light_info
+            ]
+
+            return json.dumps(room_info, indent=2)
+
+        # Try as name with fuzzy matching
+        rooms = {gid: g for gid, g in groups.items() if g.get('type') == 'Room'}
+        matches = find_similar_names(room_identifier, rooms, threshold=3)
+
+        if not matches:
+            return f"Error: No room found matching '{room_identifier}'.\nUse get_all_rooms() to see available rooms."
+
+        if len(matches) == 1 or matches[0][2] == 0:
+            # Single or exact match
+            room_id, room_name, distance = matches[0]
+            group = groups[room_id]
+
+            room_info = {
+                "id": room_id,
+                "name": group['name'],
+                "room_class": group.get('class', 'Other'),
+                "lights": group['lights'],
+                "light_count": len(group['lights']),
+                "state": group['state']
+            }
+
+            room_info["light_details"] = [
+                {
+                    "id": lid,
+                    "name": light_info[lid]['name'],
+                    "on": light_info[lid]['state']['on'],
+                    "reachable": light_info[lid]['state'].get('reachable', True)
+                }
+                for lid in group['lights'] if lid in light_info
+            ]
+
+            return json.dumps(room_info, indent=2)
+
+        # Multiple matches - ask for clarification
+        suggestions = [f"'{m[1]}' (ID: {m[0]})" for m in matches[:3]]
+        return f"Multiple rooms match '{room_identifier}'. Did you mean: {', '.join(suggestions)}?\nPlease be more specific."
+
+    except Exception as e:
+        logger.error(f"Error getting room '{room_identifier}': {e}")
+        return f"Error: {str(e)}"
+
+@mcp.tool()
+def get_all_zones(ctx: Context) -> str:
+    """
+    Get all zones (groups with type='Zone') for multi-room groupings.
+
+    Returns:
+        JSON string containing information about all zones
+    """
+    bridge, light_info = get_bridge_ctx(ctx)
+
+    try:
+        groups = bridge.groups()
+
+        # Filter for zones only (type='Zone')
+        zones = {}
+        for group_id, group in groups.items():
+            if group.get('type') == 'Zone':
+                zones[group_id] = {
+                    "id": group_id,
+                    "name": group['name'],
+                    "zone_class": group.get('class', 'Other'),
+                    "lights": group['lights'],
+                    "light_count": len(group['lights']),
+                    "state": {
+                        "all_on": group['state']['all_on'],
+                        "any_on": group['state']['any_on']
+                    }
+                }
+
+                # Add light names
+                zones[group_id]["light_names"] = [
+                    light_info[lid]['name'] for lid in group['lights']
+                    if lid in light_info
+                ]
+
+        if not zones:
+            return "No zones found. Zones can be created using create_zone()."
+
+        return json.dumps({"total_zones": len(zones), "zones": zones}, indent=2)
+
+    except Exception as e:
+        logger.error(f"Error getting zones: {e}")
+        return f"Error: {str(e)}"
+
+@mcp.tool()
+def control_room(room_name: str, on: bool, ctx: Context) -> str:
+    """
+    Turn a room on or off by name using fuzzy matching.
+
+    Args:
+        room_name: Full or partial room name (fuzzy matching supported)
+        on: True to turn on, False to turn off
+
+    Returns:
+        Confirmation message or "Did you mean?" suggestions
+    """
+    bridge, _ = get_bridge_ctx(ctx)
+
+    try:
+        groups = bridge.groups()
+        rooms = {gid: g for gid, g in groups.items() if g.get('type') == 'Room'}
+
+        if not rooms:
+            return "No rooms found. Rooms can be created in the Hue app or using create_room()."
+
+        # Find matching rooms
+        matches = find_similar_names(room_name, rooms, threshold=3)
+
+        if not matches:
+            return f"Error: No room found matching '{room_name}'.\nUse get_all_rooms() to see available rooms."
+
+        # If exact or close match, use it
+        if len(matches) == 1 or matches[0][2] == 0:
+            room_id, room_name_matched, distance = matches[0]
+            bridge.groups[str(room_id)].action(on=on)
+            action = "on" if on else "off"
+            room_class = rooms[room_id].get('class', 'Room')
+            return f"{room_class} '{room_name_matched}' (ID: {room_id}) turned {action}."
+
+        # Multiple matches - ask user to clarify
+        suggestions = [f"'{m[1]}' (ID: {m[0]}, {rooms[m[0]].get('class', 'Room')})" for m in matches[:3]]
+        return f"Multiple rooms match '{room_name}'. Did you mean: {', '.join(suggestions)}?\nPlease use a more specific name or use the room ID."
+
+    except Exception as e:
+        logger.error(f"Error controlling room '{room_name}': {e}")
+        return f"Error: {str(e)}"
+
+@mcp.tool()
+def set_room_brightness(room_name: str, brightness: int, ctx: Context, transition_time: int = 4) -> str:
+    """
+    Set the brightness of all lights in a room by name.
+
+    Args:
+        room_name: Full or partial room name (fuzzy matching supported)
+        brightness: Brightness level (0-254)
+        transition_time: Transition duration in deciseconds (1 = 0.1s, 10 = 1s). Default: 4 (0.4s)
+
+    Returns:
+        Confirmation message
+    """
+    if not 0 <= brightness <= 254:
+        return "Error: Brightness must be between 0 and 254."
+
+    if transition_time < 0:
+        return "Error: Transition time must be non-negative."
+
+    bridge, _ = get_bridge_ctx(ctx)
+
+    try:
+        groups = bridge.groups()
+        rooms = {gid: g for gid, g in groups.items() if g.get('type') == 'Room'}
+
+        if not rooms:
+            return "No rooms found. Rooms can be created in the Hue app or using create_room()."
+
+        # Find matching rooms
+        matches = find_similar_names(room_name, rooms, threshold=3)
+
+        if not matches:
+            return f"Error: No room found matching '{room_name}'.\nUse get_all_rooms() to see available rooms."
+
+        if len(matches) == 1 or matches[0][2] == 0:
+            room_id, room_name_matched, distance = matches[0]
+            room = rooms[room_id]
+
+            # Turn on if off
+            if not room['state']['any_on']:
+                bridge.groups[str(room_id)].action(on=True)
+
+            bridge.groups[str(room_id)].action(bri=brightness, transitiontime=transition_time)
+
+            percentage = round((brightness / 254) * 100)
+            transition_seconds = transition_time / 10
+            room_class = room.get('class', 'Room')
+            return f"{room_class} '{room_name_matched}' brightness set to {brightness} ({percentage}%) with {transition_seconds}s transition."
+
+        # Multiple matches
+        suggestions = [f"'{m[1]}' (ID: {m[0]})" for m in matches[:3]]
+        return f"Multiple rooms match '{room_name}'. Did you mean: {', '.join(suggestions)}?"
+
+    except Exception as e:
+        logger.error(f"Error setting room brightness '{room_name}': {e}")
+        return f"Error: {str(e)}"
+
+@mcp.tool()
+def set_room_color(room_name: str, red: int, green: int, blue: int, ctx: Context, transition_time: int = 4) -> str:
+    """
+    Set the color of all lights in a room by name.
+
+    Args:
+        room_name: Full or partial room name (fuzzy matching supported)
+        red: Red value (0-255)
+        green: Green value (0-255)
+        blue: Blue value (0-255)
+        transition_time: Transition duration in deciseconds (1 = 0.1s, 10 = 1s). Default: 4 (0.4s)
+
+    Returns:
+        Confirmation message
+    """
+    if not all(0 <= c <= 255 for c in (red, green, blue)):
+        return "Error: RGB values must be between 0 and 255."
+
+    if transition_time < 0:
+        return "Error: Transition time must be non-negative."
+
+    bridge, _ = get_bridge_ctx(ctx)
+
+    try:
+        groups = bridge.groups()
+        rooms = {gid: g for gid, g in groups.items() if g.get('type') == 'Room'}
+
+        if not rooms:
+            return "No rooms found. Rooms can be created in the Hue app or using create_room()."
+
+        # Find matching rooms
+        matches = find_similar_names(room_name, rooms, threshold=3)
+
+        if not matches:
+            return f"Error: No room found matching '{room_name}'.\nUse get_all_rooms() to see available rooms."
+
+        if len(matches) == 1 or matches[0][2] == 0:
+            room_id, room_name_matched, distance = matches[0]
+            room = rooms[room_id]
+
+            # Turn on if off
+            if not room['state']['any_on']:
+                bridge.groups[str(room_id)].action(on=True)
+
+            xy = rgb_to_xy(red, green, blue)
+            bridge.groups[str(room_id)].action(xy=xy, transitiontime=transition_time)
+
+            transition_seconds = transition_time / 10
+            room_class = room.get('class', 'Room')
+            return f"{room_class} '{room_name_matched}' color set to RGB({red}, {green}, {blue}) with {transition_seconds}s transition."
+
+        # Multiple matches
+        suggestions = [f"'{m[1]}' (ID: {m[0]})" for m in matches[:3]]
+        return f"Multiple rooms match '{room_name}'. Did you mean: {', '.join(suggestions)}?"
+
+    except Exception as e:
+        logger.error(f"Error setting room color '{room_name}': {e}")
+        return f"Error: {str(e)}"
+
+@mcp.tool()
+def set_room_preset(room_name: str, preset: str, ctx: Context) -> str:
+    """
+    Apply a color preset to a room by name.
+
+    Args:
+        room_name: Full or partial room name (fuzzy matching supported)
+        preset: Color preset name (warm, cool, daylight, concentration, relax, reading, energize, etc.)
+
+    Returns:
+        Confirmation message
+    """
+    # Define presets (same as individual light presets)
+    presets = {
+        "warm": {"ct": 2500},
+        "cool": {"ct": 4500},
+        "daylight": {"ct": 6500},
+        "concentration": {"ct": 4600, "bri": 254},
+        "relax": {"ct": 2700, "bri": 144},
+        "reading": {"ct": 3200, "bri": 219},
+        "energize": {"ct": 6000, "bri": 254},
+        "red": {"xy": rgb_to_xy(255, 0, 0)},
+        "green": {"xy": rgb_to_xy(0, 255, 0)},
+        "blue": {"xy": rgb_to_xy(0, 0, 255)},
+        "purple": {"xy": rgb_to_xy(128, 0, 128)},
+        "orange": {"xy": rgb_to_xy(255, 165, 0)},
+    }
+
+    if preset not in presets:
+        return f"Error: Unknown preset. Available presets: {', '.join(presets.keys())}"
+
+    bridge, _ = get_bridge_ctx(ctx)
+
+    try:
+        groups = bridge.groups()
+        rooms = {gid: g for gid, g in groups.items() if g.get('type') == 'Room'}
+
+        if not rooms:
+            return "No rooms found. Rooms can be created in the Hue app or using create_room()."
+
+        # Find matching rooms
+        matches = find_similar_names(room_name, rooms, threshold=3)
+
+        if not matches:
+            return f"Error: No room found matching '{room_name}'.\nUse get_all_rooms() to see available rooms."
+
+        if len(matches) == 1 or matches[0][2] == 0:
+            room_id, room_name_matched, distance = matches[0]
+            room = rooms[room_id]
+
+            # Turn on if off
+            if not room['state']['any_on']:
+                bridge.groups[str(room_id)].action(on=True)
+
+            # Apply preset
+            for key, value in presets[preset].items():
+                bridge.groups[str(room_id)].action(**{key: value})
+
+            room_class = room.get('class', 'Room')
+            return f"Applied '{preset}' preset to {room_class} '{room_name_matched}'."
+
+        # Multiple matches
+        suggestions = [f"'{m[1]}' (ID: {m[0]})" for m in matches[:3]]
+        return f"Multiple rooms match '{room_name}'. Did you mean: {', '.join(suggestions)}?"
+
+    except Exception as e:
+        logger.error(f"Error setting room preset '{room_name}': {e}")
+        return f"Error: {str(e)}"
+
 # --- Prompts ---
 
 @mcp.prompt()
