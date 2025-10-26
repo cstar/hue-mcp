@@ -2989,6 +2989,502 @@ def get_active_effects(ctx: Context) -> str:
         return f"Error: {str(e)}"
 
 
+# ============================================================================
+# SCHEDULES & TIMERS - Time-Based Automation
+# ============================================================================
+
+@mcp.tool()
+def create_schedule(
+    name: str,
+    time: str,
+    command: str,
+    target_identifier: str,
+    ctx: Context,
+    days: str = "all",
+    enabled: bool = True
+) -> str:
+    """
+    Create a time-based schedule for automated light control.
+
+    Args:
+        name: Descriptive name for the schedule (e.g., "Morning Wake Up")
+        time: Time in HH:MM format (24-hour, e.g., "07:30")
+        command: Action to perform (on, off, scene, brightness, preset)
+        target_identifier: Light ID, room name, or light name
+        ctx: MCP Context
+        days: Days to run - "all", "weekdays", "weekends", or comma-separated (e.g., "mon,wed,fri")
+        enabled: Whether schedule is active (default: True)
+
+    Returns:
+        Success message with schedule ID
+    """
+    bridge, light_info = get_bridge_ctx(ctx)
+
+    try:
+        # Parse and validate time
+        try:
+            hour, minute = map(int, time.split(':'))
+            if not (0 <= hour <= 23 and 0 <= minute <= 59):
+                return "Error: Time must be in HH:MM format (00:00 to 23:59)"
+        except ValueError:
+            return "Error: Time must be in HH:MM format (e.g., '07:30')"
+
+        # Parse days into recurrence pattern
+        day_map = {
+            "mon": 64, "tue": 32, "wed": 16, "thu": 8,
+            "fri": 4, "sat": 2, "sun": 1
+        }
+
+        if days.lower() == "all":
+            recurrence_bitmask = 127  # All days
+        elif days.lower() == "weekdays":
+            recurrence_bitmask = 124  # Mon-Fri (64+32+16+8+4)
+        elif days.lower() == "weekends":
+            recurrence_bitmask = 3    # Sat-Sun (2+1)
+        else:
+            # Parse comma-separated days
+            recurrence_bitmask = 0
+            for day in days.lower().split(','):
+                day = day.strip()[:3]  # Get first 3 chars
+                if day in day_map:
+                    recurrence_bitmask |= day_map[day]
+                else:
+                    return f"Error: Invalid day '{day}'. Use mon, tue, wed, thu, fri, sat, sun"
+
+        # Find target (light or room)
+        target_id = None
+        is_room = False
+
+        try:
+            target_id = int(target_identifier)
+            if validate_light_id(target_id, light_info):
+                is_room = False
+            else:
+                groups = bridge.groups()
+                if str(target_id) in groups:
+                    is_room = True
+                else:
+                    return f"Error: Light/Room ID {target_id} not found"
+        except ValueError:
+            # Try room name matching
+            groups = bridge.groups()
+            room_matches = find_similar_names(target_identifier, groups, threshold=FUZZY_MATCH_THRESHOLD)
+            if room_matches:
+                target_id = int(room_matches[0][0])
+                is_room = True
+            else:
+                # Try light name matching
+                light_matches = find_similar_names(target_identifier, light_info, threshold=FUZZY_MATCH_THRESHOLD)
+                if light_matches:
+                    target_id = int(light_matches[0][0])
+                    is_room = False
+                else:
+                    return f"Error: No light or room found matching '{target_identifier}'"
+
+        # Build command based on action
+        api_command = {}
+        if command.lower() == "on":
+            api_command = {"on": True}
+        elif command.lower() == "off":
+            api_command = {"on": False}
+        elif command.lower().startswith("brightness:"):
+            try:
+                bri = int(command.split(':')[1])
+                if 1 <= bri <= 254:
+                    api_command = {"on": True, "bri": bri}
+                else:
+                    return "Error: Brightness must be between 1 and 254"
+            except (ValueError, IndexError):
+                return "Error: Brightness format should be 'brightness:VALUE' (e.g., 'brightness:200')"
+        elif command.lower() in COLOR_PRESETS:
+            preset = COLOR_PRESETS[command.lower()]
+            api_command = {"on": True, **preset}
+        else:
+            return f"Error: Unknown command '{command}'. Use: on, off, brightness:N, or preset name"
+
+        # Create schedule using Hue API format
+        schedule_data = {
+            "name": name,
+            "description": f"Automated schedule created via MCP",
+            "command": {
+                "address": f"/api/{bridge.username}/{'groups' if is_room else 'lights'}/{target_id}/{'action' if is_room else 'state'}",
+                "method": "PUT",
+                "body": api_command
+            },
+            "localtime": f"W{recurrence_bitmask}/T{hour:02d}:{minute:02d}:00",
+            "status": "enabled" if enabled else "disabled"
+        }
+
+        # Create schedule
+        result = bridge.schedules.create(**schedule_data)
+
+        if isinstance(result, list) and len(result) > 0 and 'success' in result[0]:
+            schedule_id = result[0]['success']['id']
+            target_type = "room" if is_room else "light"
+            days_str = days if days.lower() not in ["all", "weekdays", "weekends"] else days.lower()
+
+            return f"Schedule '{name}' created successfully!\n" \
+                   f"Schedule ID: {schedule_id}\n" \
+                   f"Time: {time}\n" \
+                   f"Days: {days_str}\n" \
+                   f"Action: {command} on {target_type} ID {target_id}\n" \
+                   f"Status: {'Enabled' if enabled else 'Disabled'}"
+        else:
+            return f"Error creating schedule: {result}"
+
+    except Exception as e:
+        logger.error(f"Error creating schedule '{name}': {e}")
+        return f"Error: {str(e)}"
+
+
+@mcp.tool()
+def list_schedules(ctx: Context) -> str:
+    """
+    List all configured schedules with details.
+
+    Args:
+        ctx: MCP Context
+
+    Returns:
+        Formatted list of all schedules
+    """
+    bridge, _ = get_bridge_ctx(ctx)
+
+    try:
+        schedules = bridge.schedules()
+
+        if not schedules:
+            return "No schedules configured."
+
+        result = f"Found {len(schedules)} schedule(s):\n\n"
+
+        for schedule_id, schedule in schedules.items():
+            name = schedule.get('name', 'Unnamed')
+            description = schedule.get('description', '')
+            status = schedule.get('status', 'unknown')
+            localtime = schedule.get('localtime', 'N/A')
+
+            # Parse command
+            command = schedule.get('command', {})
+            address = command.get('address', '')
+            body = command.get('body', {})
+
+            result += f"[{schedule_id}] {name}\n"
+            result += f"  Status: {status}\n"
+            result += f"  Time: {localtime}\n"
+            if description:
+                result += f"  Description: {description}\n"
+            result += f"  Target: {address}\n"
+            result += f"  Action: {body}\n\n"
+
+        return result.strip()
+
+    except Exception as e:
+        logger.error(f"Error listing schedules: {e}")
+        return f"Error: {str(e)}"
+
+
+@mcp.tool()
+def delete_schedule(schedule_id: int, ctx: Context) -> str:
+    """
+    Delete a schedule by ID.
+
+    Args:
+        schedule_id: Schedule ID to delete
+        ctx: MCP Context
+
+    Returns:
+        Success or error message
+    """
+    bridge, _ = get_bridge_ctx(ctx)
+
+    try:
+        schedules = bridge.schedules()
+
+        if str(schedule_id) not in schedules:
+            available = ", ".join(schedules.keys())
+            return f"Error: Schedule {schedule_id} not found.\nAvailable schedules: {available}"
+
+        schedule_name = schedules[str(schedule_id)].get('name', f'Schedule {schedule_id}')
+
+        # Delete schedule
+        result = bridge.schedules[str(schedule_id)].delete()
+
+        return f"Schedule '{schedule_name}' (ID: {schedule_id}) deleted successfully."
+
+    except Exception as e:
+        logger.error(f"Error deleting schedule {schedule_id}: {e}")
+        return f"Error: {str(e)}"
+
+
+@mcp.tool()
+def enable_disable_schedule(schedule_id: int, enable: bool, ctx: Context) -> str:
+    """
+    Enable or disable a schedule without deleting it.
+
+    Args:
+        schedule_id: Schedule ID to modify
+        enable: True to enable, False to disable
+        ctx: MCP Context
+
+    Returns:
+        Success or error message
+    """
+    bridge, _ = get_bridge_ctx(ctx)
+
+    try:
+        schedules = bridge.schedules()
+
+        if str(schedule_id) not in schedules:
+            available = ", ".join(schedules.keys())
+            return f"Error: Schedule {schedule_id} not found.\nAvailable schedules: {available}"
+
+        schedule_name = schedules[str(schedule_id)].get('name', f'Schedule {schedule_id}')
+
+        # Update schedule status
+        status = "enabled" if enable else "disabled"
+        bridge.schedules[str(schedule_id)](status=status)
+
+        action = "enabled" if enable else "disabled"
+        return f"Schedule '{schedule_name}' (ID: {schedule_id}) {action} successfully."
+
+    except Exception as e:
+        logger.error(f"Error updating schedule {schedule_id}: {e}")
+        return f"Error: {str(e)}"
+
+
+@mcp.tool()
+def set_timer(
+    target_identifier: str,
+    minutes: int,
+    ctx: Context,
+    action: str = "off"
+) -> str:
+    """
+    Set a timer to automatically turn off (or perform action on) a light/room after specified time.
+
+    Args:
+        target_identifier: Light ID, room name, or light name
+        minutes: Number of minutes until action (1-1440, max 24 hours)
+        ctx: MCP Context
+        action: Action to perform (default: "off", can be "off" or "dim:N")
+
+    Returns:
+        Success message with timer details
+    """
+    bridge, light_info = get_bridge_ctx(ctx)
+
+    try:
+        if not (1 <= minutes <= 1440):
+            return "Error: Timer duration must be between 1 and 1440 minutes (24 hours)"
+
+        # Find target (light or room)
+        target_id = None
+        is_room = False
+        target_name = target_identifier
+
+        try:
+            target_id = int(target_identifier)
+            if validate_light_id(target_id, light_info):
+                is_room = False
+                target_name = light_info[str(target_id)]['name']
+            else:
+                groups = bridge.groups()
+                if str(target_id) in groups:
+                    is_room = True
+                    target_name = groups[str(target_id)]['name']
+                else:
+                    return f"Error: Light/Room ID {target_id} not found"
+        except ValueError:
+            groups = bridge.groups()
+            room_matches = find_similar_names(target_identifier, groups, threshold=FUZZY_MATCH_THRESHOLD)
+            if room_matches:
+                target_id = int(room_matches[0][0])
+                target_name = room_matches[0][1]
+                is_room = True
+            else:
+                light_matches = find_similar_names(target_identifier, light_info, threshold=FUZZY_MATCH_THRESHOLD)
+                if light_matches:
+                    target_id = int(light_matches[0][0])
+                    target_name = light_matches[0][1]
+                    is_room = False
+                else:
+                    return f"Error: No light or room found matching '{target_identifier}'"
+
+        # Build command
+        api_command = {}
+        if action.lower() == "off":
+            api_command = {"on": False}
+        elif action.lower().startswith("dim:"):
+            try:
+                bri = int(action.split(':')[1])
+                if 1 <= bri <= 254:
+                    api_command = {"on": True, "bri": bri}
+                else:
+                    return "Error: Brightness must be between 1 and 254"
+            except (ValueError, IndexError):
+                return "Error: Dim format should be 'dim:VALUE' (e.g., 'dim:50')"
+        else:
+            return f"Error: Unknown action '{action}'. Use: off, dim:N"
+
+        # Calculate timer time (PT format for Hue API)
+        import datetime
+        timer_time = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=minutes)
+        timer_str = timer_time.strftime('%Y-%m-%dT%H:%M:%S')
+
+        # Create timer schedule
+        timer_data = {
+            "name": f"Timer: {target_name}",
+            "description": f"Auto-timer set for {minutes} minutes",
+            "command": {
+                "address": f"/api/{bridge.username}/{'groups' if is_room else 'lights'}/{target_id}/{'action' if is_room else 'state'}",
+                "method": "PUT",
+                "body": api_command
+            },
+            "localtime": timer_str,
+            "status": "enabled",
+            "autodelete": True  # Auto-delete after execution
+        }
+
+        result = bridge.schedules.create(**timer_data)
+
+        if isinstance(result, list) and len(result) > 0 and 'success' in result[0]:
+            timer_id = result[0]['success']['id']
+            target_type = "room" if is_room else "light"
+
+            return f"Timer set for {target_type} '{target_name}'!\n" \
+                   f"Timer ID: {timer_id}\n" \
+                   f"Action: {action} in {minutes} minute(s)\n" \
+                   f"Execution time: {timer_str}\n" \
+                   f"Timer will auto-delete after execution."
+        else:
+            return f"Error creating timer: {result}"
+
+    except Exception as e:
+        logger.error(f"Error setting timer for '{target_identifier}': {e}")
+        return f"Error: {str(e)}"
+
+
+@mcp.tool()
+def schedule_sunrise_daily(
+    target_identifier: str,
+    wake_time: str,
+    ctx: Context,
+    duration_minutes: int = 30
+) -> str:
+    """
+    Quick setup for daily sunrise wake-up routine.
+
+    Args:
+        target_identifier: Light ID, room name, or light name
+        wake_time: Desired wake time in HH:MM format (e.g., "07:00")
+        ctx: MCP Context
+        duration_minutes: Sunrise duration (default: 30 minutes)
+
+    Returns:
+        Success message with schedule details
+    """
+    bridge, light_info = get_bridge_ctx(ctx)
+
+    try:
+        # Calculate start time (duration before wake time)
+        try:
+            wake_hour, wake_minute = map(int, wake_time.split(':'))
+            if not (0 <= wake_hour <= 23 and 0 <= wake_minute <= 59):
+                return "Error: Time must be in HH:MM format (00:00 to 23:59)"
+
+            # Calculate start time
+            import datetime
+            wake_dt = datetime.datetime(2000, 1, 1, wake_hour, wake_minute)
+            start_dt = wake_dt - datetime.timedelta(minutes=duration_minutes)
+            start_time = start_dt.strftime('%H:%M')
+
+        except ValueError:
+            return "Error: Wake time must be in HH:MM format (e.g., '07:00')"
+
+        # Create schedule that triggers sunrise simulation
+        result = create_schedule(
+            name=f"Daily Sunrise - {wake_time}",
+            time=start_time,
+            command="brightness:1",  # Start very dim
+            target_identifier=target_identifier,
+            ctx=ctx,
+            days="all",
+            enabled=True
+        )
+
+        if "created successfully" in result:
+            return f"Daily sunrise routine configured!\n{result}\n\n" \
+                   f"Note: This schedule starts at {start_time} (dim), but you'll need to use " \
+                   f"sunrise_simulation() tool manually or create additional automation for full sunrise effect."
+        else:
+            return result
+
+    except Exception as e:
+        logger.error(f"Error creating daily sunrise schedule: {e}")
+        return f"Error: {str(e)}"
+
+
+@mcp.tool()
+def schedule_sunset_daily(
+    target_identifier: str,
+    sleep_time: str,
+    ctx: Context,
+    duration_minutes: int = 30
+) -> str:
+    """
+    Quick setup for daily sunset sleep preparation routine.
+
+    Args:
+        target_identifier: Light ID, room name, or light name
+        sleep_time: Desired sleep time in HH:MM format (e.g., "22:00")
+        ctx: MCP Context
+        duration_minutes: Sunset duration (default: 30 minutes)
+
+    Returns:
+        Success message with schedule details
+    """
+    bridge, light_info = get_bridge_ctx(ctx)
+
+    try:
+        # Calculate start time (duration before sleep time)
+        try:
+            sleep_hour, sleep_minute = map(int, sleep_time.split(':'))
+            if not (0 <= sleep_hour <= 23 and 0 <= sleep_minute <= 59):
+                return "Error: Time must be in HH:MM format (00:00 to 23:59)"
+
+            # Calculate start time
+            import datetime
+            sleep_dt = datetime.datetime(2000, 1, 1, sleep_hour, sleep_minute)
+            start_dt = sleep_dt - datetime.timedelta(minutes=duration_minutes)
+            start_time = start_dt.strftime('%H:%M')
+
+        except ValueError:
+            return "Error: Sleep time must be in HH:MM format (e.g., '22:00')"
+
+        # Create schedule that starts with current state
+        result = create_schedule(
+            name=f"Daily Sunset - {sleep_time}",
+            time=start_time,
+            command="warm",  # Start warm preset
+            target_identifier=target_identifier,
+            ctx=ctx,
+            days="all",
+            enabled=True
+        )
+
+        if "created successfully" in result:
+            return f"Daily sunset routine configured!\n{result}\n\n" \
+                   f"Note: This schedule starts at {start_time} (warm), but you'll need to use " \
+                   f"sunset_simulation() tool manually or create additional automation for full sunset effect."
+        else:
+            return result
+
+    except Exception as e:
+        logger.error(f"Error creating daily sunset schedule: {e}")
+        return f"Error: {str(e)}"
+
+
 # --- Prompts ---
 
 @mcp.prompt()
