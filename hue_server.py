@@ -3485,6 +3485,580 @@ def schedule_sunset_daily(
         return f"Error: {str(e)}"
 
 
+# ============================================================================
+# SENSORS, SWITCHES & RULES - Device Discovery and Automation
+# ============================================================================
+
+@mcp.tool()
+def list_sensors(ctx: Context, sensor_type: str = "all") -> str:
+    """
+    List all sensors, switches, and other devices connected to the bridge.
+
+    Args:
+        ctx: MCP Context
+        sensor_type: Filter by type - "all", "switch", "motion", "temperature", "lightlevel", "presence"
+
+    Returns:
+        Formatted list of sensors with details
+    """
+    bridge, _ = get_bridge_ctx(ctx)
+
+    try:
+        sensors = bridge.sensors()
+
+        if not sensors:
+            return "No sensors found."
+
+        # Filter sensors by type if specified
+        filtered_sensors = {}
+        for sensor_id, sensor in sensors.items():
+            sensor_model = sensor.get('type', '').lower()
+
+            if sensor_type == "all":
+                filtered_sensors[sensor_id] = sensor
+            elif sensor_type == "switch" and ("switch" in sensor_model or "button" in sensor_model or "tap" in sensor_model):
+                filtered_sensors[sensor_id] = sensor
+            elif sensor_type == "motion" and ("motion" in sensor_model or "presence" in sensor_model):
+                filtered_sensors[sensor_id] = sensor
+            elif sensor_type == "temperature" and "temperature" in sensor_model:
+                filtered_sensors[sensor_id] = sensor
+            elif sensor_type == "lightlevel" and "lightlevel" in sensor_model:
+                filtered_sensors[sensor_id] = sensor
+            elif sensor_type == "presence" and "presence" in sensor_model:
+                filtered_sensors[sensor_id] = sensor
+
+        if not filtered_sensors:
+            return f"No sensors found matching type '{sensor_type}'."
+
+        result = f"Found {len(filtered_sensors)} sensor(s)"
+        if sensor_type != "all":
+            result += f" (type: {sensor_type})"
+        result += ":\n\n"
+
+        for sensor_id, sensor in filtered_sensors.items():
+            name = sensor.get('name', 'Unnamed')
+            sensor_type_name = sensor.get('type', 'Unknown')
+            model = sensor.get('modelid', 'N/A')
+            manufacturer = sensor.get('manufacturername', 'N/A')
+
+            state = sensor.get('state', {})
+            config = sensor.get('config', {})
+
+            result += f"[{sensor_id}] {name}\n"
+            result += f"  Type: {sensor_type_name}\n"
+            result += f"  Model: {model} ({manufacturer})\n"
+            result += f"  Battery: {config.get('battery', 'N/A')}%\n" if 'battery' in config else ""
+            result += f"  Reachable: {config.get('reachable', 'Unknown')}\n"
+            result += f"  On: {config.get('on', 'N/A')}\n"
+
+            # Show relevant state based on sensor type
+            if 'presence' in state:
+                result += f"  Presence: {state['presence']}\n"
+            if 'temperature' in state:
+                temp_celsius = state['temperature'] / 100.0
+                result += f"  Temperature: {temp_celsius}°C\n"
+            if 'lightlevel' in state:
+                result += f"  Light Level: {state['lightlevel']}\n"
+            if 'buttonevent' in state:
+                result += f"  Last Button: {state['buttonevent']}\n"
+            if 'lastupdated' in state:
+                result += f"  Last Updated: {state['lastupdated']}\n"
+
+            result += "\n"
+
+        return result.strip()
+
+    except Exception as e:
+        logger.error(f"Error listing sensors: {e}")
+        return f"Error: {str(e)}"
+
+
+@mcp.tool()
+def get_sensor_details(sensor_id: int, ctx: Context) -> str:
+    """
+    Get detailed information about a specific sensor.
+
+    Args:
+        sensor_id: Sensor ID to query
+        ctx: MCP Context
+
+    Returns:
+        Detailed sensor information
+    """
+    bridge, _ = get_bridge_ctx(ctx)
+
+    try:
+        sensors = bridge.sensors()
+
+        if str(sensor_id) not in sensors:
+            available = ", ".join(sensors.keys())
+            return f"Error: Sensor {sensor_id} not found.\nAvailable sensors: {available}"
+
+        sensor = sensors[str(sensor_id)]
+
+        result = f"Sensor Details - ID {sensor_id}\n\n"
+        result += f"Name: {sensor.get('name', 'Unnamed')}\n"
+        result += f"Type: {sensor.get('type', 'Unknown')}\n"
+        result += f"Model ID: {sensor.get('modelid', 'N/A')}\n"
+        result += f"Manufacturer: {sensor.get('manufacturername', 'N/A')}\n"
+        result += f"Software Version: {sensor.get('swversion', 'N/A')}\n"
+        result += f"Unique ID: {sensor.get('uniqueid', 'N/A')}\n\n"
+
+        # Configuration
+        config = sensor.get('config', {})
+        result += "Configuration:\n"
+        for key, value in config.items():
+            result += f"  {key}: {value}\n"
+
+        # State
+        state = sensor.get('state', {})
+        result += "\nCurrent State:\n"
+        for key, value in state.items():
+            result += f"  {key}: {value}\n"
+
+        # Capabilities
+        if 'capabilities' in sensor:
+            result += "\nCapabilities:\n"
+            capabilities = sensor['capabilities']
+            for key, value in capabilities.items():
+                result += f"  {key}: {value}\n"
+
+        return result.strip()
+
+    except Exception as e:
+        logger.error(f"Error getting sensor details for {sensor_id}: {e}")
+        return f"Error: {str(e)}"
+
+
+@mcp.tool()
+def get_sensor_state(sensor_id: int, ctx: Context) -> str:
+    """
+    Get the current state/reading of a sensor.
+
+    Args:
+        sensor_id: Sensor ID to query
+        ctx: MCP Context
+
+    Returns:
+        Current sensor state
+    """
+    bridge, _ = get_bridge_ctx(ctx)
+
+    try:
+        sensors = bridge.sensors()
+
+        if str(sensor_id) not in sensors:
+            available = ", ".join(sensors.keys())
+            return f"Error: Sensor {sensor_id} not found.\nAvailable sensors: {available}"
+
+        sensor = sensors[str(sensor_id)]
+        name = sensor.get('name', 'Unnamed')
+        sensor_type = sensor.get('type', 'Unknown')
+        state = sensor.get('state', {})
+
+        result = f"Sensor State - {name} (ID {sensor_id})\n"
+        result += f"Type: {sensor_type}\n\n"
+
+        if not state:
+            return result + "No state information available."
+
+        # Format state based on sensor type
+        if 'presence' in state:
+            result += f"Presence Detected: {'Yes' if state['presence'] else 'No'}\n"
+
+        if 'temperature' in state:
+            temp_celsius = state['temperature'] / 100.0
+            result += f"Temperature: {temp_celsius}°C ({temp_celsius * 9/5 + 32:.1f}°F)\n"
+
+        if 'lightlevel' in state:
+            light_level = state['lightlevel']
+            # Convert to lux (approximate)
+            lux = round(10 ** ((light_level - 1) / 10000))
+            result += f"Light Level: {light_level} (~{lux} lux)\n"
+            if 'dark' in state:
+                result += f"Dark: {state['dark']}\n"
+            if 'daylight' in state:
+                result += f"Daylight: {state['daylight']}\n"
+
+        if 'buttonevent' in state:
+            result += f"Last Button Event: {state['buttonevent']}\n"
+
+        if 'lastupdated' in state:
+            result += f"Last Updated: {state['lastupdated']}\n"
+
+        return result.strip()
+
+    except Exception as e:
+        logger.error(f"Error getting sensor state for {sensor_id}: {e}")
+        return f"Error: {str(e)}"
+
+
+@mcp.tool()
+def rename_sensor(sensor_id: int, new_name: str, ctx: Context) -> str:
+    """
+    Rename a sensor.
+
+    Args:
+        sensor_id: Sensor ID to rename
+        new_name: New name for the sensor
+        ctx: MCP Context
+
+    Returns:
+        Success or error message
+    """
+    bridge, _ = get_bridge_ctx(ctx)
+
+    try:
+        sensors = bridge.sensors()
+
+        if str(sensor_id) not in sensors:
+            available = ", ".join(sensors.keys())
+            return f"Error: Sensor {sensor_id} not found.\nAvailable sensors: {available}"
+
+        old_name = sensors[str(sensor_id)].get('name', 'Unnamed')
+
+        # Rename sensor
+        bridge.sensors[str(sensor_id)](name=new_name)
+
+        return f"Sensor renamed successfully!\n" \
+               f"ID: {sensor_id}\n" \
+               f"Old name: {old_name}\n" \
+               f"New name: {new_name}"
+
+    except Exception as e:
+        logger.error(f"Error renaming sensor {sensor_id}: {e}")
+        return f"Error: {str(e)}"
+
+
+@mcp.tool()
+def configure_sensor(
+    sensor_id: int,
+    ctx: Context,
+    on: bool = None,
+    sensitivity: int = None,
+    battery: int = None
+) -> str:
+    """
+    Configure sensor settings.
+
+    Args:
+        sensor_id: Sensor ID to configure
+        ctx: MCP Context
+        on: Enable/disable sensor (True/False)
+        sensitivity: Sensitivity level for motion sensors (0-2: low/medium/high)
+        battery: Battery level (read-only, for information)
+
+    Returns:
+        Success or error message
+    """
+    bridge, _ = get_bridge_ctx(ctx)
+
+    try:
+        sensors = bridge.sensors()
+
+        if str(sensor_id) not in sensors:
+            available = ", ".join(sensors.keys())
+            return f"Error: Sensor {sensor_id} not found.\nAvailable sensors: {available}"
+
+        sensor_name = sensors[str(sensor_id)].get('name', 'Unnamed')
+        config_updates = {}
+
+        if on is not None:
+            config_updates['on'] = on
+
+        if sensitivity is not None:
+            if 0 <= sensitivity <= 2:
+                config_updates['sensitivity'] = sensitivity
+            else:
+                return "Error: Sensitivity must be 0 (low), 1 (medium), or 2 (high)"
+
+        if not config_updates:
+            return "Error: No configuration changes specified. Use on=True/False or sensitivity=0-2"
+
+        # Update sensor configuration
+        bridge.sensors[str(sensor_id)].config(**config_updates)
+
+        result = f"Sensor '{sensor_name}' (ID {sensor_id}) configured successfully!\n"
+        result += "Updated settings:\n"
+        for key, value in config_updates.items():
+            result += f"  {key}: {value}\n"
+
+        return result.strip()
+
+    except Exception as e:
+        logger.error(f"Error configuring sensor {sensor_id}: {e}")
+        return f"Error: {str(e)}"
+
+
+@mcp.tool()
+def create_rule(
+    name: str,
+    sensor_id: int,
+    condition: str,
+    action_command: str,
+    action_target: str,
+    ctx: Context
+) -> str:
+    """
+    Create an automation rule based on sensor triggers.
+
+    Args:
+        name: Rule name (e.g., "Motion activate lights")
+        sensor_id: Sensor ID that triggers the rule
+        condition: Condition to check (e.g., "presence==true", "temperature>2000", "buttonevent==1002")
+        action_command: Action to perform (on, off, brightness:N, scene:NAME)
+        action_target: Target light/room identifier
+        ctx: MCP Context
+
+    Returns:
+        Success message with rule ID
+    """
+    bridge, light_info = get_bridge_ctx(ctx)
+
+    try:
+        sensors = bridge.sensors()
+
+        if str(sensor_id) not in sensors:
+            return f"Error: Sensor {sensor_id} not found"
+
+        # Parse condition
+        condition_parts = condition.split('==') if '==' in condition else \
+                         condition.split('>') if '>' in condition else \
+                         condition.split('<') if '<' in condition else None
+
+        if not condition_parts or len(condition_parts) != 2:
+            return "Error: Condition must be in format 'attribute==value', 'attribute>value', or 'attribute<value'"
+
+        attr = condition_parts[0].strip()
+        value = condition_parts[1].strip()
+
+        # Determine operator
+        if '==' in condition:
+            operator = 'eq'
+        elif '>' in condition:
+            operator = 'gt'
+        elif '<' in condition:
+            operator = 'lt'
+        else:
+            operator = 'eq'
+
+        # Convert value to appropriate type
+        if value.lower() == 'true':
+            value = True
+        elif value.lower() == 'false':
+            value = False
+        else:
+            try:
+                value = int(value)
+            except ValueError:
+                pass  # Keep as string
+
+        # Find action target
+        target_id = None
+        is_room = False
+
+        try:
+            target_id = int(action_target)
+            if validate_light_id(target_id, light_info):
+                is_room = False
+            else:
+                groups = bridge.groups()
+                if str(target_id) in groups:
+                    is_room = True
+                else:
+                    return f"Error: Light/Room ID {target_id} not found"
+        except ValueError:
+            groups = bridge.groups()
+            room_matches = find_similar_names(action_target, groups, threshold=FUZZY_MATCH_THRESHOLD)
+            if room_matches:
+                target_id = int(room_matches[0][0])
+                is_room = True
+            else:
+                light_matches = find_similar_names(action_target, light_info, threshold=FUZZY_MATCH_THRESHOLD)
+                if light_matches:
+                    target_id = int(light_matches[0][0])
+                    is_room = False
+                else:
+                    return f"Error: No light or room found matching '{action_target}'"
+
+        # Build action
+        api_command = {}
+        if action_command.lower() == "on":
+            api_command = {"on": True}
+        elif action_command.lower() == "off":
+            api_command = {"on": False}
+        elif action_command.lower().startswith("brightness:"):
+            try:
+                bri = int(action_command.split(':')[1])
+                if 1 <= bri <= 254:
+                    api_command = {"on": True, "bri": bri}
+                else:
+                    return "Error: Brightness must be between 1 and 254"
+            except (ValueError, IndexError):
+                return "Error: Brightness format should be 'brightness:VALUE'"
+        else:
+            return f"Error: Unknown action '{action_command}'. Use: on, off, brightness:N"
+
+        # Create rule
+        rule_data = {
+            "name": name,
+            "conditions": [
+                {
+                    "address": f"/sensors/{sensor_id}/state/{attr}",
+                    "operator": operator,
+                    "value": str(value) if not isinstance(value, bool) else value
+                }
+            ],
+            "actions": [
+                {
+                    "address": f"/{'groups' if is_room else 'lights'}/{target_id}/{'action' if is_room else 'state'}",
+                    "method": "PUT",
+                    "body": api_command
+                }
+            ],
+            "status": "enabled"
+        }
+
+        result = bridge.rules.create(**rule_data)
+
+        if isinstance(result, list) and len(result) > 0 and 'success' in result[0]:
+            rule_id = result[0]['success']['id']
+            target_type = "room" if is_room else "light"
+
+            return f"Rule '{name}' created successfully!\n" \
+                   f"Rule ID: {rule_id}\n" \
+                   f"Trigger: Sensor {sensor_id} when {condition}\n" \
+                   f"Action: {action_command} on {target_type} {target_id}\n" \
+                   f"Status: Enabled"
+        else:
+            return f"Error creating rule: {result}"
+
+    except Exception as e:
+        logger.error(f"Error creating rule '{name}': {e}")
+        return f"Error: {str(e)}"
+
+
+@mcp.tool()
+def list_rules(ctx: Context) -> str:
+    """
+    List all automation rules.
+
+    Args:
+        ctx: MCP Context
+
+    Returns:
+        Formatted list of all rules
+    """
+    bridge, _ = get_bridge_ctx(ctx)
+
+    try:
+        rules = bridge.rules()
+
+        if not rules:
+            return "No rules configured."
+
+        result = f"Found {len(rules)} rule(s):\n\n"
+
+        for rule_id, rule in rules.items():
+            name = rule.get('name', 'Unnamed')
+            status = rule.get('status', 'unknown')
+            owner = rule.get('owner', 'N/A')
+
+            conditions = rule.get('conditions', [])
+            actions = rule.get('actions', [])
+
+            result += f"[{rule_id}] {name}\n"
+            result += f"  Status: {status}\n"
+            result += f"  Owner: {owner}\n"
+
+            if conditions:
+                result += "  Conditions:\n"
+                for cond in conditions:
+                    result += f"    - {cond.get('address', 'N/A')} {cond.get('operator', '')} {cond.get('value', '')}\n"
+
+            if actions:
+                result += "  Actions:\n"
+                for action in actions:
+                    result += f"    - {action.get('method', '')} {action.get('address', 'N/A')}: {action.get('body', {})}\n"
+
+            result += "\n"
+
+        return result.strip()
+
+    except Exception as e:
+        logger.error(f"Error listing rules: {e}")
+        return f"Error: {str(e)}"
+
+
+@mcp.tool()
+def delete_rule(rule_id: int, ctx: Context) -> str:
+    """
+    Delete an automation rule.
+
+    Args:
+        rule_id: Rule ID to delete
+        ctx: MCP Context
+
+    Returns:
+        Success or error message
+    """
+    bridge, _ = get_bridge_ctx(ctx)
+
+    try:
+        rules = bridge.rules()
+
+        if str(rule_id) not in rules:
+            available = ", ".join(rules.keys())
+            return f"Error: Rule {rule_id} not found.\nAvailable rules: {available}"
+
+        rule_name = rules[str(rule_id)].get('name', f'Rule {rule_id}')
+
+        # Delete rule
+        bridge.rules[str(rule_id)].delete()
+
+        return f"Rule '{rule_name}' (ID: {rule_id}) deleted successfully."
+
+    except Exception as e:
+        logger.error(f"Error deleting rule {rule_id}: {e}")
+        return f"Error: {str(e)}"
+
+
+@mcp.tool()
+def enable_disable_rule(rule_id: int, enable: bool, ctx: Context) -> str:
+    """
+    Enable or disable an automation rule without deleting it.
+
+    Args:
+        rule_id: Rule ID to modify
+        enable: True to enable, False to disable
+        ctx: MCP Context
+
+    Returns:
+        Success or error message
+    """
+    bridge, _ = get_bridge_ctx(ctx)
+
+    try:
+        rules = bridge.rules()
+
+        if str(rule_id) not in rules:
+            available = ", ".join(rules.keys())
+            return f"Error: Rule {rule_id} not found.\nAvailable rules: {available}"
+
+        rule_name = rules[str(rule_id)].get('name', f'Rule {rule_id}')
+
+        # Update rule status
+        status = "enabled" if enable else "disabled"
+        bridge.rules[str(rule_id)](status=status)
+
+        action = "enabled" if enable else "disabled"
+        return f"Rule '{rule_name}' (ID: {rule_id}) {action} successfully."
+
+    except Exception as e:
+        logger.error(f"Error updating rule {rule_id}: {e}")
+        return f"Error: {str(e)}"
+
+
 # --- Prompts ---
 
 @mcp.prompt()
